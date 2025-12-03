@@ -1,0 +1,16 @@
+# .gitignore (пример)
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+.DS_Store
+.idea/
+.vscode/
+
+# data & artifacts (do NOT commit raw datasets/models)
+data/
+artifacts/
+*.joblib
+*.pkl
+*.h5

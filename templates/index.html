@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Fraud detection demo (IEEE + LGBM)</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="page">
+  <header class="header">
+    <h1>Fraud detection demo</h1>
+    <p class="subtitle">IEEE dataset · LGBM pipeline · SHAP explanations</p>
+  </header>
+
+  <main class="layout">
+    <!-- Левая колонка: форма -->
+    <section class="card">
+      <h2>Input features</h2>
+
+      <form id="feature-form" autocomplete="off">
+        <div class="form-grid">
+
+          <!-- amount -->
+          <div class="form-row">
+            <label for="amount">Amount</label>
+            <input id="amount" name="amount" type="number" step="0.01" />
+          </div>
+
+          <!-- hour -->
+          <div class="form-row">
+            <label for="hour">Hour (0–23)</label>
+            <input id="hour" name="hour" type="number" min="0" max="23" />
+          </div>
+
+          <!-- card_age_months -->
+          <div class="form-row">
+            <label for="card_age_months">Card age (months)</label>
+            <input id="card_age_months" name="card_age_months" type="number" min="0" />
+          </div>
+
+          <!-- sender_txn_24h -->
+          <div class="form-row">
+            <label for="sender_txn_24h">Sender txn 24h</label>
+            <input id="sender_txn_24h" name="sender_txn_24h" type="number" min="0" />
+          </div>
+
+          <!-- sender_avg_amount -->
+          <div class="form-row">
+            <label for="sender_avg_amount">Sender avg amount</label>
+            <input id="sender_avg_amount" name="sender_avg_amount" type="number" step="0.01" />
+          </div>
+
+          <!-- distance_km -->
+          <div class="form-row">
+            <label for="distance_km">Distance (km)</label>
+            <input id="distance_km" name="distance_km" type="number" step="0.01" />
+          </div>
+
+          <!-- ip_risk -->
+          <div class="form-row">
+            <label for="ip_risk">IP risk (0–1)</label>
+            <input id="ip_risk" name="ip_risk" type="number" min="0" max="1" step="0.000001" />
+          </div>
+
+          <!-- mcc -->
+          <div class="form-row">
+            <label for="mcc">MCC</label>
+            <select id="mcc" name="mcc">
+              <option value="">—</option>
+              <option value="4812">4812 – Telecom</option>
+              <option value="5411">5411 – Grocery</option>
+              <option value="5912">5912 – Pharmacy</option>
+              <option value="6011">6011 – ATM</option>
+              <option value="7995">7995 – Gambling</option>
+            </select>
+          </div>
+
+          <!-- country_risk -->
+          <div class="form-row">
+            <label for="country_risk">Country risk</label>
+            <select id="country_risk" name="country_risk">
+              <option value="">—</option>
+              <option value="0">0 – low</option>
+              <option value="1">1 – medium</option>
+              <option value="2">2 – high</option>
+            </select>
+          </div>
+
+          <!-- receiver_new -->
+          <div class="form-row">
+            <label for="receiver_new">New receiver</label>
+            <select id="receiver_new" name="receiver_new">
+              <option value="">—</option>
+              <option value="0">No</option>
+              <option value="1">Yes</option>
+            </select>
+          </div>
+
+          <!-- device_new -->
+          <div class="form-row">
+            <label for="device_new">New device</label>
+            <select id="device_new" name="device_new">
+              <option value="">—</option>
+              <option value="0">No</option>
+              <option value="1">Yes</option>
+            </select>
+          </div>
+
+          <!-- is_foreign -->
+          <div class="form-row">
+            <label for="is_foreign">Foreign transaction</label>
+            <select id="is_foreign" name="is_foreign">
+              <option value="">—</option>
+              <option value="0">No</option>
+              <option value="1">Yes</option>
+            </select>
+          </div>
+
+        </div>
+
+        <div class="buttons-row">
+          <button type="button" id="btn-random-normal">Random normal</button>
+          <button type="button" id="btn-random-fraud">Random fraud</button>
+          <button type="button" id="btn-clear">Clear</button>
+        </div>
+
+        <div class="buttons-row">
+          <button type="button" id="btn-predict" class="primary">Predict</button>
+          <button type="button" id="btn-shap" class="secondary">Explain (SHAP)</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- Правая колонка: результат + SHAP -->
+    <section class="card">
+      <h2>Prediction</h2>
+      <div id="prediction-box" class="prediction">
+        <div id="pred-label" class="pred-label">No prediction yet</div>
+        <div class="pred-details">
+          <div>Fraud probability: <span id="pred-prob">–</span></div>
+          <div>Threshold: <span id="pred-threshold">–</span></div>
+        </div>
+      </div>
+
+      <h3>SHAP explanation</h3>
+
+      <!-- ВОТ ЗДЕСЬ ШАП-КОНТЕЙНЕР -->
+      <div id="shap_container" class="shap-box">
+        <div id="shap-message" class="muted">
+          Press “Explain (SHAP)” after prediction.
+        </div>
+        <canvas id="shap-chart" width="400" height="280"></canvas>
+        <ul id="shap-list" class="shap-list"></ul>
+      </div>
+    </section>
+
+ <!-- История -->
+    <section class="card">
+      <div class="history-header">
+        <h2>History</h2>
+        <button type="button" id="btn-toggle-history">Toggle history</button>
+      </div>
+      <div id="history-container" class="history-container hidden">
+        <ul id="history-list"></ul>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script src="{{ url_for('static', filename='main.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+/* static/style.css */
+body { font-family: Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; }
+#features-area .form-label { font-weight: 600; color: #333; }
+#result-card { transition: background-color 0.2s ease; }

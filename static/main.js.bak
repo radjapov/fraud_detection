@@ -1,0 +1,163 @@
+// static/main.js
+
+function createInputRow(name) {
+  const col = document.createElement("div");
+  col.className = "col-md-4 mb-2";
+
+  const label = document.createElement("label");
+  label.className = "form-label small";
+  label.textContent = name;
+
+  const input = document.createElement("input");
+  input.type = "number";
+  input.step = "any";
+  input.className = "form-control form-control-sm";
+  input.name = name;
+  input.id = "input-" + name;
+
+  col.appendChild(label);
+  col.appendChild(input);
+  return col;
+}
+
+function buildForm() {
+  const area = document.getElementById("features-area");
+  area.innerHTML = "";
+  // мы хотим показывать Amount (вместо Amount_Scaled) и hour в удобной позиции
+  const order = FEATURES.slice(); // V1..V28, Amount_Scaled, hour
+  // заменим Amount_Scaled на Amount для ввода пользователем
+  const idx = order.indexOf("Amount_Scaled");
+  if (idx >= 0) {
+    order[idx] = "Amount"; // пользователь вводит Amount, bэкенд преобразует
+  }
+  order.forEach(f => {
+    area.appendChild(createInputRow(f));
+  });
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  buildForm();
+  const form = document.getElementById("predict-form");
+  const spinner = document.getElementById("spinner");
+  const resCard = document.getElementById("result-card");
+  const resLabel = document.getElementById("result-label");
+  const resProb = document.getElementById("result-prob");
+  const resUsed = document.getElementById("result-used");
+  const thresholdEl = document.getElementById("threshold-val");
+
+  document.getElementById("btn-sample").addEventListener("click", () => {
+    // Примерные значения
+    FEATURES.forEach((f, i) => {
+      const name = (f==="Amount_Scaled") ? "Amount" : f;
+      const el = document.getElementById("input-" + name);
+      if (!el) return;
+      if (name === "Amount") el.value = 30.5;
+      else if (name === "hour") el.value = 14;
+      else el.value = (i % 5 === 0) ? 0.5 : 0.0;
+    });
+  });
+
+  document.getElementById("btn-clear").addEventListener("click", () => {
+    FEATURES.forEach(f => {
+      const name = (f==="Amount_Scaled") ? "Amount" : f;
+      const el = document.getElementById("input-" + name);
+      if (el) el.value = "";
+    });
+    resLabel.textContent = "Здесь появится результат";
+    resProb.textContent = "Вероятность: —";
+    resUsed.textContent = "Порог использован: —";
+    resCard.style.backgroundColor = "";
+  });
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    spinner.classList.remove("d-none");
+    const payload = {};
+    FEATURES.forEach(f => {
+      const name = (f==="Amount_Scaled") ? "Amount" : f;
+      const el = document.getElementById("input-" + name);
+      if (!el) return;
+      const val = el.value;
+      if (val !== "") payload[name] = Number(val);
+    });
+
+    try {
+      const resp = await fetch("/api/predict", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      const data = await resp.json();
+      if (resp.status !== 200) {
+        resLabel.textContent = "Ошибка: " + (data.error || resp.status);
+        resCard.style.backgroundColor = "#f8d7da";
+        resProb.textContent = "";
+        resUsed.textContent = "";
+      } else {
+        const prob = Number(data.probability_fraud);
+        const label = Number(data.label);
+        const thr = Number(data.threshold_used);
+        resProb.textContent = "Вероятность мошенничества: " + (prob*100).toFixed(3) + " %";
+        resUsed.textContent = "Порог использован: " + thr.toFixed(4);
+        if (label === 1) {
+          resLabel.textContent = "⚠️ Подозрение на мошенничество";
+          resCard.style.backgroundColor = "#fff3cd"; // yellow
+        } else {
+          resLabel.textContent = "✅ Нормальная транзакция";
+          resCard.style.backgroundColor = "#d4edda"; // green
+        }
+        // Обновим показанный threshold, если нужно
+        thresholdEl.textContent = thr.toFixed(4);
+      }
+    } catch (err) {
+      resLabel.textContent = "Ошибка сети: " + err.message;
+      resCard.style.backgroundColor = "#f8d7da";
+    } finally {
+      spinner.classList.add("d-none");
+    }
+  });
+  let shapChart = null;
+
+async function requestShap(payload) {
+  try {
+    const resp = await fetch("/api/shap", {
+      method: "POST",
+      headers: {"Content-Type":"application/json"},
+      body: JSON.stringify(payload)
+    });
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "shap failed");
+    renderShap(data);
+  } catch (e) {
+    console.error("shap err", e);
+  }
+}
+
+function renderShap(data) {
+  const arr = data.shap;
+  // сортируем по абсолютному влиянию и возьмём топ N
+  const top = arr.slice().sort((a,b)=> Math.abs(b.shap)-Math.abs(a.shap)).slice(0,10).reverse();
+  const labels = top.map(x=>x.feature);
+  const values = top.map(x=>x.shap);
+  const colors = values.map(v=> v>0 ? 'rgba(220,53,69,0.8)' : 'rgba(40,167,69,0.8)'); // positive red; negative green
+  const ctx = document.getElementById("shap-chart").getContext("2d");
+  if (shapChart) shapChart.destroy();
+  shapChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'SHAP value',
+        data: values,
+        backgroundColor: colors
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      plugins: { legend: { display:false } },
+      scales: { x: { title: { display:true, text: 'SHAP' } } }
+    }
+  });
+}
+});

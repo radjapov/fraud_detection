@@ -1,0 +1,36 @@
+[project]
+name = "fraud-detection"
+version = "0.1.0"
+description = "Interactive fraud detection demo with IEEE-CIS model, Flask UI and SHAP."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "flask",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    "lightgbm",
+    "shap",
+    "joblib",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+]
+
+[tool.uv]
+# uv будет юзать этот pyproject
+
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+skip-string-normalization = true
+
+[tool.isort]
+profile = "black"
+line_length = 100
+known_first_party = ["fraud_ui"]
+[tool.uv]
+python = "3.12"

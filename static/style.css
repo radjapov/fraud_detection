@@ -1,0 +1,482 @@
+/* === Global reset === */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: radial-gradient(circle at top left, #202542 0%, #050716 55%, #02030b 100%);
+  color: #f5f7ff;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* === Layout === */
+
+.page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 24px;
+}
+
+.header h1 {
+  font-size: 24px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.subtitle {
+  font-size: 13px;
+  color: #a6b0d6;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.2fr);
+  gap: 20px;
+}
+
+/* === Cards === */
+
+.card {
+  background: radial-gradient(circle at top left, rgba(66, 86, 255, 0.08), rgba(6, 10, 34, 0.95));
+  border-radius: 18px;
+  padding: 18px 18px 20px;
+  border: 1px solid rgba(132, 158, 255, 0.16);
+  box-shadow:
+    0 18px 40px rgba(0, 0, 0, 0.65),
+    0 0 0 1px rgba(18, 25, 64, 0.8);
+  backdrop-filter: blur(12px);
+}
+
+.card h2 {
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 14px;
+}
+
+/* === Form === */
+
+#feature-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 18px;
+}
+
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.form-row label {
+  font-size: 13px;
+  color: #a8b3e0;
+}
+
+input[type="number"],
+select {
+  width: 100%;
+  border-radius: 10px;
+  border: 1px solid rgba(118, 134, 199, 0.5);
+  background: radial-gradient(circle at top left, #151932, #07091b);
+  padding: 7px 9px;
+  font-size: 13px;
+  color: #f6f7ff;
+  outline: none;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease,
+    transform 0.05s ease;
+}
+
+input[type="number"]::placeholder {
+  color: #6f7695;
+}
+
+input[type="number"]:focus,
+select:focus {
+  border-color: #4d73ff;
+  box-shadow: 0 0 0 1px rgba(77, 115, 255, 0.7), 0 0 18px rgba(53, 93, 255, 0.4);
+  background: radial-gradient(circle at top left, #1c2142, #050716);
+  transform: translateY(-0.5px);
+}
+
+/* remove arrows look on some browsers but keep functionality */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Buttons */
+
+.buttons-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+button {
+  border: none;
+  border-radius: 999px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  background: rgba(40, 46, 85, 0.9);
+  color: #e8ecff;
+  box-shadow:
+    0 0 0 1px rgba(93, 109, 181, 0.6),
+    0 10px 22px rgba(0, 0, 0, 0.6);
+  transition:
+    transform 0.08s ease,
+    box-shadow 0.12s ease,
+    background 0.15s ease,
+    color 0.15s ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  background: rgba(70, 90, 190, 0.95);
+  box-shadow:
+    0 0 0 1px rgba(126, 147, 255, 0.9),
+    0 14px 28px rgba(8, 18, 70, 0.85);
+}
+
+button:active {
+  transform: translateY(0);
+  box-shadow:
+    0 0 0 1px rgba(98, 118, 220, 0.9),
+    0 6px 16px rgba(0, 0, 0, 0.7);
+}
+
+/* Primary & secondary states */
+
+button.primary {
+  background: linear-gradient(135deg, #4b7bff, #b377ff);
+  box-shadow:
+    0 0 0 1px rgba(148, 171, 255, 0.95),
+    0 16px 32px rgba(25, 71, 255, 0.7);
+}
+
+button.primary:hover {
+  background: linear-gradient(135deg, #5f8bff, #c086ff);
+}
+
+button.secondary {
+  background: radial-gradient(circle at top left, #23283f, #121529);
+}
+
+/* === Prediction box === */
+
+.prediction {
+  margin-top: 4px;
+  margin-bottom: 12px;
+  padding: 14px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(117, 142, 255, 0.5);
+  background: radial-gradient(circle at top left, rgba(70, 90, 200, 0.21), rgba(7, 9, 24, 0.96));
+  box-shadow:
+    0 12px 26px rgba(0, 0, 0, 0.8),
+    inset 0 0 0 1px rgba(9, 16, 54, 0.9);
+}
+
+/* === Prediction label highlight === */
+
+.pred-label {
+  font-size: 28px;
+  font-weight: 600;
+  margin-bottom: 6px;
+  transition: color 0.25s ease, text-shadow 0.25s ease;
+}
+
+/* Low-risk (normal) prediction */
+.pred-label.ok {
+  color: #6df1a7;
+  text-shadow:
+    0 0 8px rgba(0, 255, 180, 0.6),
+    0 0 14px rgba(0, 255, 180, 0.45);
+}
+
+/* HIGH FRAUD RISK — red glowing neon */
+.pred-label.fraud {
+  color: #ff4f7b;
+  text-shadow:
+    0 0 10px rgba(255, 80, 120, 0.8),
+    0 0 20px rgba(255, 60, 90, 0.55),
+    0 0 30px rgba(255, 50, 80, 0.35);
+}
+
+.pred-details {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  color: #d7dcff;
+}
+
+.pred-details span {
+  font-weight: 500;
+}
+
+/* === SHAP block === */
+
+#shap-box {
+  margin-top: 8px;
+  padding: 10px 10px 12px;
+  border-radius: 14px;
+  border: 1px dashed rgba(108, 127, 215, 0.7);
+  background: radial-gradient(circle at top left, #12162d, #050712);
+  min-height: 220px;
+  position: relative;
+}
+
+#shap-box.loading::after {
+  content: "Computing SHAP…";
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  color: #aab4ff;
+  backdrop-filter: blur(3px);
+  background: rgba(4, 7, 22, 0.6);
+}
+
+#shap-message {
+  font-size: 13px;
+  color: #929ac6;
+}
+
+.shap-list {
+  margin-top: 6px;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+
+.shap-list li {
+  font-size: 12px;
+  color: #c6d0ff;
+  display: flex;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 2px 0;
+}
+
+.shap-list .feat-name {
+  color: #9ca8ff;
+}
+
+.shap-list .feat-value {
+  color: #f0f2ff;
+}
+
+.shap-list .feat-shap-pos {
+  color: #ff8fa3;
+}
+
+.shap-list .feat-shap-neg {
+  color: #7ce8b8;
+}
+
+#shap-chart {
+  margin-top: 6px;
+}
+
+/* === History === */
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.history-header h2 {
+  font-size: 15px;
+}
+
+.history-container {
+  max-height: 260px;
+  overflow-y: auto;
+  border-radius: 12px;
+  border: 1px solid rgba(76, 92, 167, 0.6);
+  background: radial-gradient(circle at top left, #070a1c, #050712);
+  padding: 8px 10px;
+}
+
+.history-container.hidden {
+  display: none;
+}
+
+#history-list {
+  list-style: none;
+  font-size: 12px;
+  color: #c6cfff;
+}
+
+#history-list li + li {
+  margin-top: 6px;
+}
+
+#history-list .hist-header {
+  font-weight: 500;
+  margin-bottom: 2px;
+}
+
+#history-list .hist-json {
+  font-family: Menlo, Monaco, "JetBrains Mono", monospace;
+  font-size: 11px;
+  opacity: 0.9;
+}
+
+/* === Utility === */
+
+.muted {
+  color: #8f99c6;
+  font-size: 13px;
+}
+
+/* Scrollbar (webkit) */
+
+.history-container::-webkit-scrollbar,
+.shap-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.history-container::-webkit-scrollbar-track,
+.shap-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-container::-webkit-scrollbar-thumb,
+.shap-list::-webkit-scrollbar-thumb {
+  background: rgba(103, 121, 210, 0.75);
+  border-radius: 999px;
+}
+
+/* === Responsive === */
+
+@media (max-width: 960px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .card {
+    padding: 16px 14px 18px;
+  }
+
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+}
+
+@media (max-width: 640px) {
+  .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .buttons-row {
+    justify-content: flex-start;
+  }
+
+  .prediction {
+    margin-top: 10px;
+  }
+}
+/* SHAP horizontal bar chart tweaks */
+
+.shap-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 14px;
+  background: radial-gradient(circle at top left,
+    rgba(130, 170, 255, 0.15),
+    rgba(10, 12, 20, 0.95)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 24px 50px rgba(0, 0, 0, 0.9);
+}
+
+#shap-chart {
+  width: 100%;
+  max-width: 520px;
+  height: 260px;
+  display: block;
+  margin: 0 auto 0.5rem auto;
+}
+
+.shap-list {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  max-height: 160px;
+  overflow-y: auto;
+}
+
+.shap-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.1rem;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.03);
+}
+
+.shap-item-feature {
+  flex: 1.1;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.shap-item-value {
+  flex: 0.5;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.shap-item-value.pos {
+  color: #ff8b92;
+}
+
+.shap-item-value.neg {
+  color: #82aaff;
+}
+
+.shap-item-input {
+  flex: 0.8;
+  text-align: right;
+  color: rgba(255, 255, 255, 0.5);
+  font-variant-numeric: tabular-nums;
+}
