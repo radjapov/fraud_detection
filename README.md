@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/neo_fraud_logo.png" alt="FraudDetect Neo Logo" width="180"/>
-
 # FraudDetect: Transaction Risk Scoring with SHAP in a Dark Cyber‑Neo UI
 
 **IEEE-CIS Fraud Detection → LightGBM pipeline → SHAP explanations → Interactive Flask UI**
