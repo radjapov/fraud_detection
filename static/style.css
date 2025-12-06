@@ -131,7 +131,7 @@ input[type="number"]::-webkit-inner-spin-button {
   margin: 0;
 }
 
-/* Buttons */
+/* === Buttons === */
 
 .buttons-row {
   display: flex;
@@ -205,7 +205,7 @@ button.secondary {
     inset 0 0 0 1px rgba(9, 16, 54, 0.9);
 }
 
-/* === Prediction label highlight === */
+/* Prediction label highlight */
 
 .pred-label {
   font-size: 28px;
@@ -229,6 +229,14 @@ button.secondary {
     0 0 10px rgba(255, 80, 120, 0.8),
     0 0 20px rgba(255, 60, 90, 0.55),
     0 0 30px rgba(255, 50, 80, 0.35);
+}
+
+/* Prediction error */
+.pred-label.error {
+  color: #ffb74d;
+  text-shadow:
+    0 0 8px rgba(255, 183, 77, 0.7),
+    0 0 16px rgba(255, 140, 0, 0.4);
 }
 
 .pred-details {
@@ -310,6 +318,66 @@ button.secondary {
   margin-top: 6px;
 }
 
+/* SHAP horizontal bar chart tweaks */
+
+.shap-box {
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border-radius: 14px;
+  background: radial-gradient(circle at top left,
+    rgba(130, 170, 255, 0.15),
+    rgba(10, 12, 20, 0.95)
+  );
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.02),
+    0 24px 50px rgba(0, 0, 0, 0.9);
+}
+
+#shap-chart {
+  width: 100%;
+  max-width: 520px;
+  height: 260px;
+  display: block;
+  margin: 0 auto 0.5rem auto;
+}
+
+.shap-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.5rem;
+  font-size: 0.78rem;
+  padding: 0.2rem 0.1rem;
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.03);
+}
+
+.shap-item-feature {
+  flex: 1.1;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.shap-item-value {
+  flex: 0.5;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.shap-item-value.pos {
+  color: #ff8b92;
+}
+
+.shap-item-value.neg {
+  color: #82aaff;
+}
+
+.shap-item-input {
+  flex: 0.8;
+  text-align: right;
+  color: rgba(255, 255, 255, 0.5);
+  font-variant-numeric: tabular-nums;
+}
+
 /* === History === */
 
 .history-header {
@@ -346,15 +414,99 @@ button.secondary {
   margin-top: 6px;
 }
 
-#history-list .hist-header {
+.history-item.empty {
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.history-main {
   font-weight: 500;
   margin-bottom: 2px;
 }
 
-#history-list .hist-json {
-  font-family: Menlo, Monaco, "JetBrains Mono", monospace;
+.history-sub {
   font-size: 11px;
-  opacity: 0.9;
+  color: #9ca8ff;
+}
+
+/* === Model metrics === */
+
+.metrics-box {
+  margin-top: 4px;
+  padding: 10px 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(126, 146, 255, 0.4);
+  background: radial-gradient(circle at top left, rgba(80, 100, 220, 0.15), rgba(6, 8, 24, 0.96));
+  box-shadow:
+    0 16px 30px rgba(0, 0, 0, 0.75),
+    inset 0 0 0 1px rgba(8, 14, 48, 0.9);
+}
+
+.metrics-content {
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.metrics-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.metrics-row-small {
+  margin-top: 2px;
+}
+
+.metrics-pill {
+  flex: 1;
+  min-width: 120px;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: radial-gradient(circle at top left, rgba(18, 24, 60, 0.9), rgba(5, 7, 20, 0.95));
+  border: 1px solid rgba(138, 158, 255, 0.45);
+  box-shadow:
+    0 10px 22px rgba(0, 0, 0, 0.8),
+    0 0 0 1px rgba(16, 28, 80, 0.9);
+}
+
+.metrics-label {
+  font-size: 11px;
+  color: #9aa7ff;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+
+.metrics-value {
+  font-size: 15px;
+  font-weight: 600;
+  color: #f6f7ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics-conf {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: radial-gradient(circle at top left, rgba(18, 24, 60, 0.85), rgba(4, 6, 18, 0.95));
+  border: 1px solid rgba(118, 140, 240, 0.5);
+}
+
+.metrics-conf-grid {
+  margin-top: 4px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px 10px;
+  font-size: 12px;
+  color: #d9e0ff;
+  font-variant-numeric: tabular-nums;
+}
+
+.metrics-note {
+  font-size: 12px;
+  color: #a4b0ff;
 }
 
 /* === Utility === */
@@ -412,71 +564,4 @@ button.secondary {
   .prediction {
     margin-top: 10px;
   }
-}
-/* SHAP horizontal bar chart tweaks */
-
-.shap-box {
-  margin-top: 0.75rem;
-  padding: 0.75rem;
-  border-radius: 14px;
-  background: radial-gradient(circle at top left,
-    rgba(130, 170, 255, 0.15),
-    rgba(10, 12, 20, 0.95)
-  );
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.02),
-    0 24px 50px rgba(0, 0, 0, 0.9);
-}
-
-#shap-chart {
-  width: 100%;
-  max-width: 520px;
-  height: 260px;
-  display: block;
-  margin: 0 auto 0.5rem auto;
-}
-
-.shap-list {
-  list-style: none;
-  margin: 0.25rem 0 0;
-  padding: 0;
-  max-height: 160px;
-  overflow-y: auto;
-}
-
-.shap-item {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.5rem;
-  font-size: 0.78rem;
-  padding: 0.2rem 0.1rem;
-  border-bottom: 1px dashed rgba(255, 255, 255, 0.03);
-}
-
-.shap-item-feature {
-  flex: 1.1;
-  color: rgba(255, 255, 255, 0.75);
-}
-
-.shap-item-value {
-  flex: 0.5;
-  text-align: right;
-  font-variant-numeric: tabular-nums;
-}
-
-.shap-item-value.pos {
-  color: #ff8b92;
-}
-
-.shap-item-value.neg {
-  color: #82aaff;
-}
-
-.shap-item-input {
-  flex: 0.8;
-  text-align: right;
-  color: rgba(255, 255, 255, 0.5);
-  font-variant-numeric: tabular-nums;
 }

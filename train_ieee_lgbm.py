@@ -135,25 +135,90 @@ def train_lgbm(X_train_arr, y_train, X_val_arr, y_val, params=None, random_state
 
 
 def evaluate(pipe, X_test, y_test, threshold=0.5):
-    probs = pipe.predict_proba(X_test)[:, 1]
+    """
+    Robust evaluate: ensures shapes, flattens arrays and gives helpful diagnostics
+    before calling sklearn metrics.
+    Returns (summary_dict, probs_array)
+    """
+    # Получаем массив вероятностей класcа 1
+    try:
+        probs_raw = pipe.predict_proba(X_test)
+        # иногда predict_proba может вернуть массив 1D или 2D; приводим к 1D массива положительного класса
+        probs = None
+        pr = np.asarray(probs_raw)
+        if pr.ndim == 1:
+            # если модель вернула одномерный массив — используем его как score
+            probs = pr.ravel()
+        elif pr.ndim == 2:
+            if pr.shape[1] == 1:
+                probs = pr.ravel()
+            else:
+                # ожидаем, что класс 1 в колонке 1
+                probs = pr[:, 1].ravel()
+        else:
+            # неожиданный формат
+            probs = pr.ravel()
+    except Exception as e_pp:
+        # попробуем вызвать predict_proba на numpy values (иногда ColumnTransformer/DF влияет)
+        try:
+            probs = np.asarray(pipe.predict_proba(X_test.values))[:, 1].ravel()
+        except Exception as e2:
+            raise RuntimeError(f"predict_proba failed: {e_pp}; fallback failed: {e2}")
+
+    # Приводим y_test к numpy 1D
+    y_arr = np.asarray(y_test).ravel()
+
+    # Диагностика длин/типов
+    if probs.shape[0] != y_arr.shape[0]:
+        # печатаем подробную диагностику и бросаем явную ошибку
+        raise RuntimeError(
+            "Length mismatch between y_test and predicted probs: "
+            f"len(y_test)={y_arr.shape[0]}, len(probs)={probs.shape[0]}. "
+            "Investigate pipeline.predict_proba output. "
+            f"probs.shape={probs.shape}, probs.dtype={probs.dtype}"
+        )
+
+    # Удаляем NaN / inf если вдруг
+    mask_valid = np.isfinite(probs)
+    if not np.all(mask_valid):
+        # если здесь удаляем, то синхронно уменьшаем y_arr
+        probs = probs[mask_valid]
+        y_arr = y_arr[mask_valid]
+
+    # final safety cast to float
+    probs = probs.astype(float)
+
+    # вычисляем метрики
     preds = (probs >= threshold).astype(int)
-    report = classification_report(y_test, preds, output_dict=True, zero_division=0)
-    roc = roc_auc_score(y_test, probs)
-    prec, rec, thr = precision_recall_curve(y_test, probs)
-    pr_auc = auc(rec, prec)
-    cm = confusion_matrix(y_test, preds)
+    report = classification_report(y_arr, preds, output_dict=True, zero_division=0)
+
+    # roc_auc_score может упасть, если все y одинаковы — ловим исключение
+    try:
+        roc = float(roc_auc_score(y_arr, probs))
+    except Exception as e_roc:
+        roc = None
+        print("[evaluate] roc_auc_score failed:", e_roc)
+
+    try:
+        prec, rec, thr = precision_recall_curve(y_arr, probs)
+        pr_auc = float(auc(rec, prec))
+    except Exception as e_pr:
+        prec, rec, thr = None, None, None
+        pr_auc = None
+        print("[evaluate] precision_recall_curve failed:", e_pr)
+
+    cm = confusion_matrix(y_arr, preds)
     summary = {
         "classification_report": report,
-        "roc_auc": float(roc),
-        "pr_auc": float(pr_auc),
+        "roc_auc": roc,
+        "pr_auc": pr_auc,
         "confusion_matrix": cm.tolist(),
-        "probs_min": float(np.min(probs)),
-        "probs_max": float(np.max(probs)),
-        "probs_mean": float(np.mean(probs)),
-        "n_test": int(len(y_test)),
+        "probs_min": float(np.min(probs)) if probs.size else None,
+        "probs_max": float(np.max(probs)) if probs.size else None,
+        "probs_mean": float(np.mean(probs)) if probs.size else None,
+        "n_test": int(len(y_arr)),
     }
     return summary, probs
-
 
 def build_pipeline_and_train(df, target_col="is_fraud", out_dir="artifacts", sample_frac=None):
     df = df.copy()

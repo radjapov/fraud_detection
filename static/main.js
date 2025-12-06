@@ -1,5 +1,5 @@
 // static/main.js
-// Frontend for IEEE fraud demo: form, predict, random, SHAP horizontal bar chart, history toggle
+// Frontend for IEEE fraud demo: form, predict, random, SHAP horizontal bar chart, history toggle + metrics
 
 document.addEventListener("DOMContentLoaded", () => {
   const form = document.getElementById("feature-form");
@@ -14,13 +14,30 @@ document.addEventListener("DOMContentLoaded", () => {
   const predProb = document.getElementById("pred-prob");
   const predThreshold = document.getElementById("pred-threshold");
 
-  const shapBox = document.getElementById("shap-box");
+  // SHAP
+  const shapBox = document.getElementById("shap-box"); // container div
   const shapMessage = document.getElementById("shap-message");
   const shapCanvas = document.getElementById("shap-chart");
   const shapList = document.getElementById("shap-list");
 
+  // History
   const historyContainer = document.getElementById("history-container");
   const historyList = document.getElementById("history-list");
+
+  // Metrics
+  const metricsBox = document.getElementById("metrics-box");
+  const metricsMessage = document.getElementById("metrics-message");
+  const mSamples = document.getElementById("m-samples");
+  const mFraudRate = document.getElementById("m-fraud-rate");
+  const mRocAuc = document.getElementById("m-roc-auc");
+  const mPrAuc = document.getElementById("m-pr-auc");
+  const mAcc = document.getElementById("m-acc");
+  const mF1 = document.getElementById("m-f1");
+  const mTN = document.getElementById("m-tn");
+  const mFP = document.getElementById("m-fp");
+  const mFN = document.getElementById("m-fn");
+  const mTP = document.getElementById("m-tp");
+  const mThr = document.getElementById("m-threshold");
 
   let lastPayload = null;
   let lastPrediction = null;
@@ -48,7 +65,7 @@ document.addEventListener("DOMContentLoaded", () => {
       const val = el.value;
 
       if (val === "" || val === null || typeof val === "undefined") {
-        return; // не отправляем пустые
+        return; // skip empty
       }
 
       if (el.type === "number") {
@@ -83,7 +100,9 @@ document.addEventListener("DOMContentLoaded", () => {
     predLabel.textContent = "No prediction yet";
     predLabel.className = "pred-label";
     predProb.textContent = "–";
-    shapMessage.textContent = "Press “Explain (SHAP)” after prediction.";
+    predThreshold.textContent = "–";
+    shapMessage.textContent = "Press \"Explain (SHAP)\" after prediction.";
+    shapBox?.classList.remove("loading");
     clearShapChart();
     clearShapList();
   }
@@ -95,7 +114,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
     const isFraud = prob >= threshold;
     predLabel.textContent = isFraud ? "High fraud risk" : "Low fraud risk";
-    predLabel.className = "pred-label " + (isFraud ? "fraud" : "normal");
+    // ВАЖНО: классы синхронизированы с CSS (.pred-label.ok / .pred-label.fraud)
+    predLabel.className = "pred-label " + (isFraud ? "fraud" : "ok");
   }
 
   function clearShapChart() {
@@ -155,6 +175,7 @@ document.addEventListener("DOMContentLoaded", () => {
   function renderShapChart(shapData) {
     clearShapChart();
     clearShapList();
+    shapBox?.classList.remove("loading");
 
     if (!shapData || !Array.isArray(shapData.shap) || shapData.shap.length === 0) {
       shapMessage.textContent = "No SHAP data.";
@@ -172,7 +193,7 @@ document.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // sort by |shap| desc и берём топ-8
+    // sort by |shap| desc and take top-8
     items.sort((a, b) => Math.abs(b.shap) - Math.abs(a.shap));
     const top = items.slice(0, 8);
 
@@ -187,7 +208,7 @@ document.addEventListener("DOMContentLoaded", () => {
     const paddingTop = 20;
     const paddingBottom = 20;
 
-    const zeroX = Math.round((paddingLeft + (W - paddingRight)) / 2); // ноль по центру
+    const zeroX = Math.round((paddingLeft + (W - paddingRight)) / 2); // center line
     const maxBarWidth = (W - paddingLeft - paddingRight) / 2;
 
     const barAreaHeight = H - paddingTop - paddingBottom;
@@ -200,11 +221,11 @@ document.addEventListener("DOMContentLoaded", () => {
       1e-9
     );
 
-    // фон
+    // background
     ctx.fillStyle = "rgba(255,255,255,0.03)";
     ctx.fillRect(0, 0, W, H);
 
-    // ось нуля
+    // zero axis
     ctx.beginPath();
     ctx.strokeStyle = "rgba(255,255,255,0.15)";
     ctx.lineWidth = 1;
@@ -224,38 +245,42 @@ document.addEventListener("DOMContentLoaded", () => {
       const barLen = fraction * maxBarWidth;
 
       const isPositive = value >= 0;
-      const barColor = isPositive ? "#ff5370" : "#82aaff"; // красный / синий в нео-стиле
+      const barColor = isPositive ? "#ff5370" : "#82aaff"; // red / blue neo-style
 
       const xStart = barLen >= 0 ? zeroX : zeroX + barLen;
       const width = Math.abs(barLen);
       const yTop = yCenter - barThickness / 2;
 
-      // линия под баром (для аккуратности)
+      // subtle line under bar
       ctx.beginPath();
       ctx.strokeStyle = "rgba(255,255,255,0.06)";
       ctx.moveTo(paddingLeft - 10, yCenter + barThickness / 2 + 3);
       ctx.lineTo(W - paddingRight + 10, yCenter + barThickness / 2 + 3);
       ctx.stroke();
 
-      // сам бар
+      // bar
       ctx.fillStyle = barColor;
       ctx.beginPath();
-      ctx.roundRect(xStart, yTop, width || 1, barThickness, 6);
+      if (ctx.roundRect) {
+        ctx.roundRect(xStart, yTop, width || 1, barThickness, 6);
+      } else {
+        ctx.rect(xStart, yTop, width || 1, barThickness);
+      }
       ctx.fill();
 
-      // имя фичи слева
+      // feature name (left)
       ctx.fillStyle = "rgba(255,255,255,0.75)";
       ctx.textAlign = "right";
       ctx.fillText(feature, paddingLeft - 12, yCenter);
 
-      // значение SHAP справа от бара (или слева, если отрицательный)
+      // SHAP value near bar
       ctx.textAlign = isPositive ? "left" : "right";
       const textX = isPositive ? xStart + width + 6 : xStart - 6;
       ctx.fillStyle = "rgba(255,255,255,0.8)";
       ctx.fillText(value.toFixed(3), textX, yCenter);
     });
 
-    // обновим список под графиком (компактно)
+    // compact list under chart
     top.forEach((item) => {
       const li = document.createElement("li");
       li.className = "shap-item";
@@ -265,8 +290,7 @@ document.addEventListener("DOMContentLoaded", () => {
       left.textContent = item.feature;
 
       const mid = document.createElement("span");
-      mid.className =
-        "shap-item-value " + (item.shap >= 0 ? "pos" : "neg");
+      mid.className = "shap-item-value " + (item.shap >= 0 ? "pos" : "neg");
       mid.textContent = item.shap.toFixed(3);
 
       const right = document.createElement("span");
@@ -281,6 +305,86 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
+// ---- metrics ----
+function renderMetrics(m) {
+  if (!m) {
+    metricsMessage.textContent = "Metrics not available.";
+    return;
+  }
+
+  metricsMessage.textContent = "";
+
+  const data = m.data || m || {};
+  const global = m.global_metrics || m.global || {};
+  const thr = m.threshold_metrics || {};
+  const cmRaw = thr.confusion_matrix || null;
+
+  const samples = data.samples ?? null;
+  const fraudRate = data.fraud_rate ?? null;
+
+  const rocAuc = global.roc_auc ?? null;
+  const prAuc = global.pr_auc ?? null;
+
+  const acc = thr.accuracy ?? null;
+  const f1 = thr.f1 ?? null;
+  const threshold = thr.threshold ?? null;
+
+  let tn = null;
+  let fp = null;
+  let fn = null;
+  let tp = null;
+
+  // 1) [[TN, FP], [FN, TP]]
+  // 2) {TN: ..., FP: ..., FN: ..., TP: ...}
+  if (cmRaw) {
+    if (Array.isArray(cmRaw)) {
+      tn = cmRaw[0]?.[0] ?? null;
+      fp = cmRaw[0]?.[1] ?? null;
+      fn = cmRaw[1]?.[0] ?? null;
+      tp = cmRaw[1]?.[1] ?? null;
+    } else if (typeof cmRaw === "object") {
+      tn = cmRaw.TN ?? cmRaw.tn ?? null;
+      fp = cmRaw.FP ?? cmRaw.fp ?? null;
+      fn = cmRaw.FN ?? cmRaw.fn ?? null;
+      tp = cmRaw.TP ?? cmRaw.tp ?? null;
+    }
+  }
+
+  mSamples.textContent =
+    samples != null ? samples.toLocaleString("en-US") : "–";
+  mFraudRate.textContent =
+    fraudRate != null ? (fraudRate * 100).toFixed(2) + " %" : "–";
+
+  mRocAuc.textContent = rocAuc != null ? rocAuc.toFixed(4) : "–";
+  mPrAuc.textContent = prAuc != null ? prAuc.toFixed(4) : "–";
+
+  mAcc.textContent = acc != null ? acc.toFixed(4) : "–";
+  mF1.textContent = f1 != null ? f1.toFixed(4) : "–";
+
+  mTN.textContent = "TN: " + (tn != null ? tn.toLocaleString("en-US") : "–");
+  mFP.textContent = "FP: " + (fp != null ? fp.toLocaleString("en-US") : "–");
+  mFN.textContent = "FN: " + (fn != null ? fn.toLocaleString("en-US") : "–");
+  mTP.textContent = "TP: " + (tp != null ? tp.toLocaleString("en-US") : "–");
+
+  mThr.textContent = threshold != null ? threshold.toFixed(3) : "–";
+}
+
+function fetchMetrics() {
+  if (!metricsBox) return;
+  fetch("/api/metrics")
+    .then((r) => r.json())
+    .then((data) => {
+      // поддерживаем оба варианта:
+      // 1) {metrics: {...}}
+      // 2) {...} сразу
+      const m = data && (data.metrics ?? data);
+      renderMetrics(m);
+    })
+    .catch((err) => {
+      console.error("metrics error:", err);
+      metricsMessage.textContent = "Metrics load failed.";
+    });
+}
   // ---- events ----
 
   btnRandomNormal?.addEventListener("click", () => {
@@ -355,6 +459,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     shapMessage.textContent = "Calculating SHAP...";
+    shapBox?.classList.add("loading");
     clearShapChart();
     clearShapList();
 
@@ -367,6 +472,7 @@ document.addEventListener("DOMContentLoaded", () => {
       .then((data) => {
         if (data.error) {
           console.error("SHAP failed:", data);
+          shapBox?.classList.remove("loading");
           shapMessage.textContent = "SHAP failed: " + (data.message || data.error);
           return;
         }
@@ -374,6 +480,7 @@ document.addEventListener("DOMContentLoaded", () => {
       })
       .catch((err) => {
         console.error("SHAP failed:", err);
+        shapBox?.classList.remove("loading");
         shapMessage.textContent = "SHAP failed: " + err;
       });
   });
@@ -385,6 +492,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
-  // initial history load (свернут, но данные можем подгрузить)
+  // initial loads
   fetchHistory();
+  fetchMetrics();
 });

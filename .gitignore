@@ -14,3 +14,12 @@ artifacts/
 *.joblib
 *.pkl
 *.h5
+# Raw IEEE-CIS dataset (too large for GitHub)
+data/ieee/train_transaction.csv
+data/ieee/train_identity.csv
+data/ieee/test_transaction.csv
+data/ieee/sample_submission.csv
+
+# Local stuff
+artifacts/history.json
+artifacts/shap_input.json

@@ -3,3 +3,4 @@ artifacts/*.joblib filter=lfs diff=lfs merge=lfs -text
 artifacts/*.pkl filter=lfs diff=lfs merge=lfs -text
 fraud_app/*.joblib filter=lfs diff=lfs merge=lfs -text
 data/ieee/*.csv filter=lfs diff=lfs merge=lfs -text
+data/ieee_prepared.csv filter=lfs diff=lfs merge=lfs -text

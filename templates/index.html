@@ -13,7 +13,7 @@
   </header>
 
   <main class="layout">
-    <!-- Левая колонка: форма -->
+    <!-- Left column: input form -->
     <section class="card">
       <h2>Input features</h2>
 
@@ -131,7 +131,7 @@
       </form>
     </section>
 
-    <!-- Правая колонка: результат + SHAP -->
+    <!-- Right column: prediction + SHAP + history + metrics -->
     <section class="card">
       <h2>Prediction</h2>
       <div id="prediction-box" class="prediction">
@@ -143,18 +143,16 @@
       </div>
 
       <h3>SHAP explanation</h3>
-
-      <!-- ВОТ ЗДЕСЬ ШАП-КОНТЕЙНЕР -->
       <div id="shap_container" class="shap-box">
         <div id="shap-message" class="muted">
-          Press “Explain (SHAP)” after prediction.
+          Press "Explain (SHAP)" after prediction.
         </div>
         <canvas id="shap-chart" width="400" height="280"></canvas>
         <ul id="shap-list" class="shap-list"></ul>
       </div>
     </section>
 
- <!-- История -->
+    <!-- History -->
     <section class="card">
       <div class="history-header">
         <h2>History</h2>
@@ -162,6 +160,69 @@
       </div>
       <div id="history-container" class="history-container hidden">
         <ul id="history-list"></ul>
+      </div>
+    </section>
+
+    <!-- Model metrics -->
+    <section class="card">
+      <h2>Model metrics</h2>
+      <div id="metrics-box" class="metrics-box">
+        <div id="metrics-message" class="muted">
+          Loading metrics…
+        </div>
+
+        <div id="metrics-content" class="metrics-content">
+          <div class="metrics-row">
+            <div class="metrics-pill">
+              <div class="metrics-label">Samples</div>
+              <div class="metrics-value" id="m-samples">–</div>
+            </div>
+            <div class="metrics-pill">
+              <div class="metrics-label">Fraud rate</div>
+              <div class="metrics-value" id="m-fraud-rate">–</div>
+            </div>
+          </div>
+
+          <div class="metrics-row">
+            <div class="metrics-pill">
+              <div class="metrics-label">ROC-AUC</div>
+              <div class="metrics-value" id="m-roc-auc">–</div>
+            </div>
+            <div class="metrics-pill">
+              <div class="metrics-label">PR-AUC</div>
+              <div class="metrics-value" id="m-pr-auc">–</div>
+            </div>
+          </div>
+
+          <div class="metrics-row">
+            <div class="metrics-pill">
+              <div class="metrics-label">Accuracy @ τ</div>
+              <div class="metrics-value" id="m-acc">–</div>
+            </div>
+            <div class="metrics-pill">
+              <div class="metrics-label">F1 @ τ</div>
+              <div class="metrics-value" id="m-f1">–</div>
+            </div>
+          </div>
+
+          <div class="metrics-row metrics-row-small">
+            <div class="metrics-conf">
+              <div class="metrics-label">Confusion matrix [TN FP; FN TP]</div>
+              <div class="metrics-conf-grid">
+                <span id="m-tn">TN: –</span>
+                <span id="m-fp">FP: –</span>
+                <span id="m-fn">FN: –</span>
+                <span id="m-tp">TP: –</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="metrics-row metrics-row-small">
+            <div class="metrics-note">
+              Threshold τ: <span id="m-threshold">–</span>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   </main>

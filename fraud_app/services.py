@@ -1,13 +1,22 @@
 """
 fraud_app.services
 
-Вся логика загрузки артефактов, предикта, SHAP и истории.
-Используется blueprint'ами в fraud_app.api.
+All logic for:
+  - loading artifacts (pipeline, meta, SHAP, thresholds)
+  - feature handling
+  - prediction
+  - SHAP explainability (via worker or inline)
+  - history storage
+  - metrics loading
+
+Used by fraud_app.api.
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -18,9 +27,11 @@ import pandas as pd
 
 # ==== paths ====
 
-ROOT_DIR = Path(__file__).resolve().parent.parent  # корень проекта fraud_detection
+# project root: .../fraud_detection
+ROOT_DIR = Path(__file__).resolve().parent.parent
 ARTIFACTS_DIR = ROOT_DIR / "artifacts"
 DATA_DIR = ROOT_DIR / "data"
+METRICS_JSON = ARTIFACTS_DIR / "metrics_ieee.json"
 
 PIPELINE_FILE = ARTIFACTS_DIR / "pipeline_ieee.joblib"
 META_FILE = ARTIFACTS_DIR / "meta_ieee.joblib"
@@ -29,18 +40,23 @@ THRESH_JSON = ARTIFACTS_DIR / "meta_ieee_threshold.json"
 HISTORY_FILE = ARTIFACTS_DIR / "history.json"
 DATASET_FILE = DATA_DIR / "ieee_prepared.csv"
 
+# where SHAP worker script lives
+SHAP_WORKER_FILE = ROOT_DIR / "fraud_app" / "shap_worker.py"
+SHAP_INPUT_JSON = ARTIFACTS_DIR / "shap_input.json"
+
 # ==== globals ====
 
 PIPE: Optional[Any] = None
 META: Optional[Dict[str, Any]] = None
-SHAP_EXPLAINER: Any = None
+SHAP_EXPLAINER: Any = None  # kept for inline SHAP (optional)
 THRESHOLD: Optional[float] = None
 
 
 # ==== utils ====
 
+
 def numpy_to_native(x: Any) -> Any:
-    """Переводит numpy-типы в обычные Python-типы, чтобы спокойно сериализовать в JSON."""
+    """Convert numpy scalars/arrays to Python native types for JSON."""
     if isinstance(x, (np.floating, np.float32, np.float64)):
         return float(x)
     if isinstance(x, (np.integer, np.int32, np.int64)):
@@ -52,8 +68,12 @@ def numpy_to_native(x: Any) -> Any:
 
 # ==== artifacts loading ====
 
+
 def load_artifacts() -> Dict[str, bool]:
-    """Грузим pipeline, meta, shap, threshold. Вызывать один раз при старте приложения."""
+    """
+    Load pipeline, meta, SHAP explainer and threshold.
+    Called once on app startup.
+    """
     global PIPE, META, SHAP_EXPLAINER, THRESHOLD
 
     summary = {"pipeline": False, "meta": False, "shap": False, "threshold": False}
@@ -95,7 +115,7 @@ def load_artifacts() -> Dict[str, bool]:
         except Exception as e:
             print("[services] Failed to load threshold json:", e)
 
-    # shap explainer
+    # SHAP explainer (for inline mode, not used by worker)
     if SHAP_FILE.exists():
         try:
             SHAP_EXPLAINER = joblib.load(SHAP_FILE)
@@ -107,8 +127,8 @@ def load_artifacts() -> Dict[str, bool]:
     else:
         print("[services] SHAP file not found:", SHAP_FILE)
 
+    # fallback threshold
     if THRESHOLD is None:
-        # дефолт — либо из META, либо 0.5
         if isinstance(META, dict) and META.get("chosen_threshold") is not None:
             THRESHOLD = float(META["chosen_threshold"])
         else:
@@ -119,7 +139,26 @@ def load_artifacts() -> Dict[str, bool]:
     return summary
 
 
+# ==== metrics ====
+
+
+def load_metrics() -> Optional[Dict[str, Any]]:
+    """Load precomputed model metrics from artifacts/metrics_ieee.json."""
+    if not METRICS_JSON.exists():
+        print(f"[metrics] File not found: {METRICS_JSON}")
+        return None
+    try:
+        with open(METRICS_JSON, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        print("[metrics] Loaded metrics from", METRICS_JSON)
+        return data
+    except Exception as e:
+        print("[metrics] Failed to load metrics:", e)
+        return None
+
+
 # ==== threshold ====
+
 
 def get_threshold() -> float:
     global THRESHOLD
@@ -129,7 +168,7 @@ def get_threshold() -> float:
 
 
 def set_threshold(value: float) -> float:
-    """Сохраняем threshold в память и в json."""
+    """Save threshold both in memory and in JSON file."""
     global THRESHOLD
     THRESHOLD = float(value)
     THRESH_JSON.parent.mkdir(parents=True, exist_ok=True)
@@ -140,6 +179,7 @@ def set_threshold(value: float) -> float:
 
 
 # ==== history ====
+
 
 def save_history_entry(entry: Dict[str, Any]) -> None:
     try:
@@ -156,21 +196,28 @@ def save_history_entry(entry: Dict[str, Any]) -> None:
         print("[services] save_history_entry failed:", e)
 
 
-def get_history() -> List[Dict[str, Any]]:
+def load_history() -> List[Dict[str, Any]]:
+    """Return stored history entries (last N predictions)."""
     if not HISTORY_FILE.exists():
         return []
     try:
         with open(HISTORY_FILE, "r", encoding="utf8") as f:
             return json.load(f)
     except Exception as e:
-        print("[services] get_history failed:", e)
+        print("[services] load_history failed:", e)
         return []
+
+
+# Backward compat alias (if somewhere you still use get_history)
+def get_history() -> List[Dict[str, Any]]:
+    return load_history()
 
 
 # ==== features & pipeline ====
 
+
 def _get_feature_list_from_meta() -> List[str]:
-    """Достаём список фичей из META / pipeline."""
+    """Get feature list from META or from pipeline.feature_names_in_."""
     global META, PIPE
 
     if isinstance(META, dict):
@@ -186,8 +233,8 @@ def _get_feature_list_from_meta() -> List[str]:
 
 def ensure_features_df(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     """
-    Приводим входной df к нужному набору фичей и порядку.
-    Добавляем отсутствующие колонки с нулями и приводим всё к float64.
+    Bring arbitrary input df to the model's expected feature set and order.
+    Missing columns are added with zeros; everything is cast to float64.
     """
     feat_list = _get_feature_list_from_meta()
 
@@ -203,16 +250,19 @@ def ensure_features_df(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         try:
             X_safe[c] = pd.to_numeric(X_safe[c], errors="coerce").astype(np.float64)
         except Exception:
-            X_safe[c] = pd.to_numeric(X_safe[c].fillna(0), errors="coerce").astype(
-                np.float64
+            X_safe[c] = (
+                pd.to_numeric(X_safe[c].fillna(0), errors="coerce")
+                .astype(np.float64)
             )
 
     X_safe = X_safe.fillna(0.0)
     return X_safe, feat_list
 
 
-def compute_probs(X_safe: pd.DataFrame) -> List[float]:
-    """Считаем вероятности фрода через pipeline."""
+def compute_probs_from_pipeline(X_safe: pd.DataFrame) -> List[float]:
+    """
+    Compute fraud probabilities via the loaded pipeline (class 1).
+    """
     global PIPE
     if PIPE is None:
         raise RuntimeError("Pipeline not loaded")
@@ -229,12 +279,18 @@ def compute_probs(X_safe: pd.DataFrame) -> List[float]:
     return [float(p) for p in np.asarray(probs)]
 
 
+# backward compat alias (if some scripts still call compute_probs)
+def compute_probs(X_safe: pd.DataFrame) -> List[float]:
+    return compute_probs_from_pipeline(X_safe)
+
+
 # ==== random row from dataset ====
+
 
 def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
     """
-    Берём случайную строку из data/ieee_prepared.csv.
-    Если fraud == 0/1 — фильтруем по is_fraud.
+    Sample a random row from data/ieee_prepared.csv.
+    If fraud == 0/1 — filter by is_fraud, otherwise use full dataset.
     """
     if not DATASET_FILE.exists():
         raise RuntimeError(f"Dataset not found: {DATASET_FILE}")
@@ -258,28 +314,30 @@ def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
     return row
 
 
-# ==== SHAP inline (без воркера) ====
+# ==== SHAP inline (no worker, optional) ====
+
+
 def compute_shap_for_df(df_safe: pd.DataFrame) -> Dict[str, Any]:
     """
-    df_safe: уже приведённый ensure_features_df датафрейм (одна строка).
-    Считаем SHAP напрямую, сразу с check_additivity=False,
-    чтобы не дергать хрупкую проверку внутри SHAP.
+    Compute SHAP values in-process for a single row (df_safe already
+    prepared by ensure_features_df). Uses check_additivity=False to
+    avoid fragile internal SHAP checks.
+
+    Not used by blueprint now (we use worker), but kept as a helper.
     """
     global SHAP_EXPLAINER
     if SHAP_EXPLAINER is None:
         raise RuntimeError("SHAP explainer not loaded")
 
-    # ВАЖНО: сразу работаем с .values и check_additivity=False
     vals = SHAP_EXPLAINER(df_safe.values, check_additivity=False)
 
-    # base_value
     base_value = None
     if hasattr(vals, "base_values"):
         base_value = vals.base_values
     elif hasattr(vals, "expected_value"):
         base_value = vals.expected_value
 
-    # приводим к np.array
+    # normalize to numpy array
     if isinstance(vals, (list, tuple)):
         shap_values = np.array(vals[0]) if len(vals) == 1 else np.array(vals)
     elif hasattr(vals, "values"):
@@ -287,7 +345,6 @@ def compute_shap_for_df(df_safe: pd.DataFrame) -> Dict[str, Any]:
     else:
         shap_values = np.asarray(vals)
 
-    # одна строка, бинарный классификатор
     if shap_values.ndim == 3:
         # (n_classes, n_samples, n_features)
         if shap_values.shape[0] >= 2:
@@ -302,21 +359,15 @@ def compute_shap_for_df(df_safe: pd.DataFrame) -> Dict[str, Any]:
         raise RuntimeError(f"Unexpected SHAP values shape: {shap_values.shape}")
 
     feat_names = list(df_safe.columns)
-
-    out: Dict[str, Any] = {
-        "base_value": numpy_to_native(base_value),
-        "shap": [],
-    }
+    out: Dict[str, Any] = {"base_value": numpy_to_native(base_value), "shap": []}
 
     for i, feat in enumerate(feat_names):
-        # значение признака
         try:
             v = df_safe.iloc[0, i]
             v = numpy_to_native(v)
         except Exception:
             v = None
 
-        # shap-значение
         s_val = sv[i] if i < len(sv) else None
         try:
             s_val = float(s_val)
@@ -333,7 +384,59 @@ def compute_shap_for_df(df_safe: pd.DataFrame) -> Dict[str, Any]:
 
     return out
 
+
+# ==== SHAP via worker process ====
+
+
+def compute_shap_for_df_via_worker(df_safe: pd.DataFrame, timeout: int = 15) -> Dict[str, Any]:
+    """
+    Compute SHAP using a separate worker process (shap_worker.py),
+    to avoid crashes inside the main Flask process.
+
+    Contract with shap_worker.py:
+      - stdin: JSON {"row": {feature: value, ...}}
+      - stdout: pure JSON: {"base_value": ..., "shap": [...]}
+      - logs печатаются в stderr.
+    """
+    if not SHAP_WORKER_FILE.exists():
+        raise RuntimeError(f"SHAP worker script not found: {SHAP_WORKER_FILE}")
+
+    # берём первую строку
+    row_dict = df_safe.iloc[0].to_dict()
+    payload = {"row": {k: numpy_to_native(v) for k, v in row_dict.items()}}
+
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(SHAP_WORKER_FILE)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+        out, err = proc.communicate(
+            input=json.dumps(payload, ensure_ascii=False),
+            timeout=timeout,
+        )
+
+        if proc.returncode != 0:
+            raise RuntimeError(f"SHAP worker failed (code {proc.returncode}): {err}")
+
+        if not out.strip():
+            raise RuntimeError(f"SHAP worker produced no output. Stderr: {err}")
+
+        # здесь stdout должен быть чистым JSON
+        data = json.loads(out)
+        return data
+
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        raise RuntimeError("SHAP worker timeout")
+    except Exception as e:
+        raise RuntimeError(f"SHAP worker error: {e}")
+
 # ==== helper to build history entry ====
+
 
 def make_history_entry(raw_df: pd.DataFrame, result: Dict[str, Any]) -> Dict[str, Any]:
     return {
