@@ -23,7 +23,7 @@ def create_app() -> Flask:
     )
 
     # регаем блюпринты
-    app.register_blueprint(bp_ui)          # фронт на "/"
+    app.register_blueprint(bp_ui)  # фронт на "/"
     app.register_blueprint(bp_api, url_prefix="/api")  # api на "/api/..."
 
     return app
