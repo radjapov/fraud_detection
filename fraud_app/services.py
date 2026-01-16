@@ -250,10 +250,7 @@ def ensure_features_df(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
         try:
             X_safe[c] = pd.to_numeric(X_safe[c], errors="coerce").astype(np.float64)
         except Exception:
-            X_safe[c] = (
-                pd.to_numeric(X_safe[c].fillna(0), errors="coerce")
-                .astype(np.float64)
-            )
+            X_safe[c] = pd.to_numeric(X_safe[c].fillna(0), errors="coerce").astype(np.float64)
 
     X_safe = X_safe.fillna(0.0)
     return X_safe, feat_list
@@ -269,9 +266,7 @@ def compute_probs_from_pipeline(X_safe: pd.DataFrame) -> List[float]:
 
     if hasattr(PIPE, "predict_proba"):
         probs = PIPE.predict_proba(X_safe)[:, 1]
-    elif isinstance(PIPE, dict) and "model" in PIPE and hasattr(
-        PIPE["model"], "predict_proba"
-    ):
+    elif isinstance(PIPE, dict) and "model" in PIPE and hasattr(PIPE["model"], "predict_proba"):
         probs = PIPE["model"].predict_proba(X_safe)[:, 1]
     else:
         raise RuntimeError("No usable predict_proba in pipeline")
@@ -434,6 +429,7 @@ def compute_shap_for_df_via_worker(df_safe: pd.DataFrame, timeout: int = 15) -> 
         raise RuntimeError("SHAP worker timeout")
     except Exception as e:
         raise RuntimeError(f"SHAP worker error: {e}")
+
 
 # ==== helper to build history entry ====
 
