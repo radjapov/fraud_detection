@@ -49,5 +49,5 @@ COPY . /app
 EXPOSE 5001
 
 # рабочая директория и команда запуска
-ENV FLASK_APP=app_ui.py
-CMD ["python", "app_ui.py"]
+ENV FLASK_APP=fraud_app
+CMD ["python", "-m", "fraud_app"]

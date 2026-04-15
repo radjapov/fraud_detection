@@ -21,7 +21,7 @@ dev = [
 ]
 
 [tool.uv]
-# uv будет юзать этот pyproject
+python = "3.12"
 
 [tool.black]
 line-length = 100
@@ -32,5 +32,3 @@ skip-string-normalization = true
 profile = "black"
 line_length = 100
 known_first_party = ["fraud_ui"]
-[tool.uv]
-python = "3.12"
