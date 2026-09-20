@@ -1,8 +1,8 @@
-flask>=2.0
-pandas>=2.0
-scikit-learn>=1.2
-lightgbm>=3.3
-joblib>=1.2
-gunicorn>=20.1
-numpy<2
-shap==0.44.1
+flask>=3.0
+pandas>=2.2
+numpy>=2.0
+joblib>=1.4
+# Model artifacts are pickles: keep these three in step with the environment that trained them
+scikit-learn==1.7.2
+lightgbm==4.6.0
+shap==0.50.0

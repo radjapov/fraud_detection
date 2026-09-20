@@ -18,6 +18,8 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 
+from fraud_app.schema import FEATURES, ID_CATEGORICAL, ID_NUMERIC, V_SELECTED
+
 
 def load_csv(path, nrows=None):
     print(f"Loading {path} ...")
@@ -47,21 +49,66 @@ def compute_card_age_months(df):
     return months.fillna(0.0)
 
 
+class CausalGroups:
+    """
+    Per-row statistics over the EARLIER rows of the same group, so nothing from the future
+    leaks into a time-based split. Rows are ordered by (group, time, original position);
+    "earlier" means earlier in that order, so ties in time are resolved by row order.
+    """
+
+    def __init__(self, group, dt):
+        group = np.asarray(group)
+        dt = np.asarray(dt, dtype=np.int64)
+        n = len(group)
+        self.n = n
+        self.order = np.lexsort((np.arange(n), dt, group))
+        g_s = group[self.order]
+        self.dt_s = dt[self.order]
+        new_group = np.r_[True, g_s[1:] != g_s[:-1]]
+        self.gid = np.cumsum(new_group) - 1
+        self.start = np.flatnonzero(new_group)[self.gid]  # first sorted index of each row's group
+        self.pos = np.arange(n)
+        self.prior_n = self.pos - self.start  # earlier rows of the same group
+
+    def restore(self, arr_sorted):
+        out = np.empty_like(arr_sorted)
+        out[self.order] = arr_sorted
+        return out
+
+    def window_count(self, seconds):
+        """Rows of the group in the trailing window (dt - seconds, dt], the current one included."""
+        key = self.gid.astype(np.int64) * 10**10 + self.dt_s
+        left = np.searchsorted(key, key - seconds, side="right")
+        return self.restore(self.pos + 1 - left)
+
+    def prior_mean(self, values):
+        """Mean of the values of EARLIER rows of the group (NaN when there are none)."""
+        v = np.asarray(values, dtype=float)[self.order]
+        c = np.cumsum(v)
+        base = np.where(self.start > 0, c[self.start - 1], 0.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            mean = (c - v - base) / self.prior_n
+        mean[self.prior_n == 0] = np.nan
+        return self.restore(mean)
+
+
 def sender_txn_24h_and_avg(df):
-    # approximate sender by card1; bucket by day (TransactionDT // secs_in_day)
+    """
+    Causal per-card features (sender ~ card1):
+
+      sender_txn_24h    - transactions of this card in the trailing 24h, incl. the current one
+      sender_avg_amount - mean amount of the card's PREVIOUS transactions
+                          (the current amount for a card's first transaction)
+    """
     if "card1" not in df.columns or "TransactionDT" not in df.columns:
         # return zeros / medians
         return pd.Series(0, index=df.index), pd.Series(df.get("TransactionAmt", 0.0)).astype(float)
-    secs_in_day = 24 * 3600
-    day = (df["TransactionDT"] // secs_in_day).astype(int)
-    # create temporary grouping keys without modifying original df globally
-    tmp = df[["card1", "TransactionID", "TransactionAmt"]].copy()
-    tmp["_day"] = day
-    counts = tmp.groupby(["card1", "_day"])["TransactionID"].transform("count")
-    mean_amt = tmp.groupby("card1")["TransactionAmt"].transform("mean")
-    counts = counts.fillna(0).astype(int)
-    mean_amt = mean_amt.fillna(df["TransactionAmt"].median() if "TransactionAmt" in df.columns else 0.0)
-    return counts, mean_amt
+
+    amt = pd.to_numeric(df["TransactionAmt"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+    g = CausalGroups(df["card1"].fillna(-1).to_numpy(), df["TransactionDT"].to_numpy())
+    mean = g.prior_mean(amt)
+    mean = np.where(np.isnan(mean), amt, mean)
+    return pd.Series(g.window_count(24 * 3600), index=df.index), pd.Series(mean, index=df.index)
 
 
 def compute_distance_km(df):
@@ -86,31 +133,6 @@ def compute_ip_risk(df, v_max=50):
         out = vals.values
         out = (out - out.min()) / (out.max() - out.min() + 1e-9)
     return pd.Series(out, index=df.index)
-
-
-def first_occurrence_flag(series):
-    # 1 if this value was never seen before (first occurrence), else 0
-    # We consider first occurrence within the whole dataframe as "new"
-    filled = series.fillna("__nan__")
-    # cumcount per key — first occurrence -> 0
-    grp = filled.groupby(filled).cumcount()
-    return (grp == 0).astype(int)
-
-
-def device_new_flag(df):
-    # use DeviceInfo or id_30 as device fingerprint
-    if "DeviceInfo" in df.columns:
-        return first_occurrence_flag(df["DeviceInfo"])
-    if "id_30" in df.columns:
-        return first_occurrence_flag(df["id_30"])
-    return pd.Series(0, index=df.index)
-
-
-def receiver_new_flag(df):
-    # use addr1 as receiver proxy
-    if "addr1" in df.columns:
-        return first_occurrence_flag(df["addr1"])
-    return pd.Series(0, index=df.index)
 
 
 def is_foreign_flag(df):
@@ -151,20 +173,40 @@ def country_risk_from_addr(df):
     return pd.Series(1, index=df.index)
 
 
-def build_features(tr, idf=None, sample_frac=None):
+RAW_NUMERIC = (
+    ["card2", "card3", "card5", "addr1", "addr2"]
+    + [f"C{i}" for i in range(1, 15)]
+    + [f"D{i}" for i in range(1, 16)]
+    + V_SELECTED
+    + ID_NUMERIC
+)
+RAW_CATEGORICAL = (
+    ["card4", "card6", "P_emaildomain", "R_emaildomain", "DeviceType"]
+    + [f"M{i}" for i in range(1, 10)]
+    + ID_CATEGORICAL
+)
+
+
+def prepare_base(tr, idf=None):
+    """Merge, coerce the basics and sort chronologically (everything below relies on the order)."""
     df = tr.copy()
     if idf is not None:
         df = safe_merge(df, idf)
 
-    print("Computing core features...")
-
-    # safe defaults and basic conversions
     if "TransactionAmt" in df.columns:
         df["TransactionAmt"] = pd.to_numeric(df["TransactionAmt"], errors="coerce").fillna(0.0)
     if "TransactionDT" in df.columns:
         df["TransactionDT"] = pd.to_numeric(df["TransactionDT"], errors="coerce").fillna(0).astype(int)
     else:
         df["TransactionDT"] = 0
+
+    return df.sort_values("TransactionDT", kind="stable").reset_index(drop=True)
+
+
+def build_features(tr, idf=None, sample_frac=None):
+    df = prepare_base(tr, idf)
+
+    print("Computing core features...")
 
     df["amount"] = df.get("TransactionAmt", 0.0).astype(float)
     df["hour"] = hour_from_dt(df["TransactionDT"].fillna(0).astype(int))
@@ -176,11 +218,19 @@ def build_features(tr, idf=None, sample_frac=None):
 
     df["distance_km"] = compute_distance_km(df)
     df["ip_risk"] = compute_ip_risk(df, v_max=50)
-    df["receiver_new"] = receiver_new_flag(df).astype(int)
-    df["device_new"] = device_new_flag(df).astype(int)
     df["is_foreign"] = is_foreign_flag(df).astype(int)
     df["mcc"] = mcc_from_product(df).astype(int)
     df["country_risk"] = country_risk_from_addr(df).astype(int)
+
+    print("Computing extended features (raw card / email / C / D / M / V / identity)...")
+    df["amount_decimal"] = (df["amount"] - np.floor(df["amount"])).round(3)
+    df["dow"] = ((df["TransactionDT"] // 86400) % 7).astype(int)
+    df["has_identity"] = df["id_01"].notna().astype(int) if "id_01" in df.columns else 0
+    for c in RAW_NUMERIC:
+        df[c] = pd.to_numeric(df[c], errors="coerce") if c in df.columns else np.nan
+    for c in RAW_CATEGORICAL:
+        if c not in df.columns:
+            df[c] = np.nan
 
     # label fallback logic
     if "isFraud" in df.columns:
@@ -188,28 +238,13 @@ def build_features(tr, idf=None, sample_frac=None):
     else:
         df["is_fraud"] = df.get("fraud", pd.Series(0, index=df.index)).fillna(0).astype(int)
 
-    feature_cols = [
-        "amount",
-        "hour",
-        "card_age_months",
-        "sender_txn_24h",
-        "sender_avg_amount",
-        "distance_km",
-        "ip_risk",
-        "receiver_new",
-        "device_new",
-        "is_foreign",
-        "mcc",
-        "country_risk",
+    feature_cols = [f.name for f in FEATURES] + [
         "is_fraud",
+        "TransactionDT",  # kept for the time-based split; NOT a model feature
     ]
-
-    # ensure all exist and correct dtypes
-    for c in feature_cols:
-        if c not in df.columns:
-            df[c] = 0
     out = df[feature_cols].copy()
 
+    # legacy demo features have no missing values by construction
     out["sender_avg_amount"] = out["sender_avg_amount"].fillna(out["amount"].median() if len(out) else 0.0)
     out["distance_km"] = out["distance_km"].fillna(0.0)
     out["ip_risk"] = out["ip_risk"].fillna(0.5)
@@ -219,22 +254,17 @@ def build_features(tr, idf=None, sample_frac=None):
 
     # optional sampling to smaller file for quick iter
     if sample_frac is not None and 0 < sample_frac < 1.0:
-        out = out.sample(frac=sample_frac, random_state=42).reset_index(drop=True)
+        out = out.sample(frac=sample_frac, random_state=42)
+        out = out.sort_values("TransactionDT", kind="stable").reset_index(drop=True)
 
-    # final dtype enforcement
-    out["amount"] = out["amount"].astype(float)
-    out["hour"] = out["hour"].astype(int)
-    out["card_age_months"] = out["card_age_months"].astype(float)
-    out["sender_txn_24h"] = out["sender_txn_24h"].astype(int)
-    out["sender_avg_amount"] = out["sender_avg_amount"].astype(float)
-    out["distance_km"] = out["distance_km"].astype(float)
-    out["ip_risk"] = out["ip_risk"].astype(float)
-    out["receiver_new"] = out["receiver_new"].astype(int)
-    out["device_new"] = out["device_new"].astype(int)
-    out["is_foreign"] = out["is_foreign"].astype(int)
-    out["mcc"] = out["mcc"].astype(int)
-    out["country_risk"] = out["country_risk"].astype(int)
-    out["is_fraud"] = out["is_fraud"].astype(int)
+    # final dtype enforcement for the integer-valued columns (NaN-able ones stay float)
+    for c in [
+        "hour", "dow", "sender_txn_24h", "is_foreign", "mcc", "country_risk", "is_fraud",
+        "TransactionDT", "has_identity",
+    ]:
+        out[c] = out[c].astype(int)
+    for c in ["amount", "card_age_months", "sender_avg_amount", "distance_km", "ip_risk"]:
+        out[c] = out[c].astype(float)
 
     return out
 

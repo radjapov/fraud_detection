@@ -2,12 +2,24 @@
 """
 Train LightGBM on prepared IEEE dataset and save pipeline + meta + optional SHAP explainer.
 
+Protocol (chronological, with late labels; see fraud_app.features.split_data):
+
+  test          the newest 20% of transactions, only used for the report
+  labeled data  everything older than ``--label-delay-days`` before the test period starts
+                (a live system does not know the labels of more recent transactions yet)
+
+  Stage A  fit on the oldest part of the labeled data, early-stop and pick the threshold on the
+           newest part of it (the validation block), which is separated from the training rows
+           by the same label-delay gap. Validation scores therefore look like test scores; a
+           validation block glued to the training rows is ~0.10 F1 too optimistic.
+  Stage B  refit on ALL labeled rows (the freshest data, including the validation block) with
+           the number of trees found in stage A, scaled to the larger training set.
+
 Usage:
   python3 train_ieee_lgbm.py --input data/ieee_prepared.csv --out-dir artifacts --sample 0.2
 """
 import argparse
 import json
-import os
 import warnings
 from pathlib import Path
 
@@ -15,18 +27,23 @@ import joblib
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
 from sklearn.metrics import (
-    auc,
+    average_precision_score,
     classification_report,
     confusion_matrix,
-    precision_recall_curve,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+from fraud_app.features import (
+    DEFAULT_LABEL_DELAY_DAYS,
+    build_preprocessor,
+    category_labels,
+    labeled_rows,
+    model_columns,
+    split_data,
+)
+from fraud_app.schema import CATEGORICAL_NAMES
 
 warnings.filterwarnings("ignore")
 
@@ -37,241 +54,152 @@ try:
 except Exception:
     SHAP_AVAILABLE = False
 
-
-def make_ohe():
-    # compatibility for OneHotEncoder API across sklearn versions
-    try:
-        return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        return OneHotEncoder(handle_unknown="ignore", sparse=False)
+# Chosen on the validation block (gap-separated), never on the test split: 63 leaves with
+# stronger regularisation was the best of four settings, by a margin close to the seed noise.
+LGBM_PARAMS = dict(
+    n_estimators=3000,
+    learning_rate=0.05,
+    num_leaves=63,
+    min_child_samples=80,
+    reg_lambda=5,
+    colsample_bytree=0.4,
+    subsample=0.8,
+    subsample_freq=1,
+    max_depth=-1,
+    random_state=42,
+    verbosity=-1,
+)
+EARLY_STOPPING_ROUNDS = 100
+VAL_SCORES_FILE = "val_scores_ieee.npz"
 
 
 def load_data(path):
     print("Loading:", path)
-    df = pd.read_csv(path)
-    return df
+    return pd.read_csv(path)
 
 
-def build_preprocessor(numeric_features, categorical_features):
-    numeric_pipe = Pipeline(
-        [
-            ("imp", SimpleImputer(strategy="median")),
-            ("sc", StandardScaler()),
-        ]
-    )
-    cat_pipe = Pipeline(
-        [
-            ("imp", SimpleImputer(strategy="constant", fill_value="NA")),
-            ("ohe", make_ohe()),
-        ]
-    )
-    preproc = ColumnTransformer(
-        [
-            ("num", numeric_pipe, numeric_features),
-            ("cat", cat_pipe, categorical_features),
-        ],
-        remainder="drop",
-        sparse_threshold=0.0,
-    )
-    return preproc
-
-
-def train_lgbm(X_train_arr, y_train, X_val_arr, y_val, params=None, random_state=42):
-    if params is None:
-        params = dict(
-            n_estimators=1000,
-            learning_rate=0.05,
-            num_leaves=31,
-            max_depth=-1,
-            random_state=random_state,
-            verbosity=-1,
-        )
+def train_lgbm(X_train_arr, y_train, X_val_arr, y_val, params=None):
+    """Stage A: fit with early stopping on the validation block."""
+    params = dict(LGBM_PARAMS if params is None else params)
     print("LightGBM params:", params)
     clf = lgb.LGBMClassifier(**params)
-
-    eval_set = [(X_val_arr, y_val)]
-    # Try modern sklearn-wrapper early_stopping param first, fallback to callbacks or simple fit
-    try:
-        # most friendly call (works on many installs)
-        clf.fit(
-            X_train_arr,
-            y_train,
-            eval_set=eval_set,
-            eval_metric="auc",
-            early_stopping_rounds=50,
-            verbose=50,
-        )
-        print("Fitted with early_stopping_rounds parameter.")
-    except TypeError as te:
-        print("early_stopping_rounds not supported directly (TypeError), trying callbacks...:", te)
-        try:
-            # try callbacks API (different lightgbm versions)
-            callbacks = []
-            # build early stopping callback if available
-            if hasattr(lgb, "callback") and hasattr(lgb.callback, "early_stopping"):
-                callbacks.append(lgb.callback.early_stopping(50))
-            # add verbose print callback if available
-            if hasattr(lgb, "callback") and hasattr(lgb.callback, "print_evaluation"):
-                callbacks.append(lgb.callback.print_evaluation(50))
-            if callbacks:
-                clf.fit(
-                    X_train_arr, y_train, eval_set=eval_set, eval_metric="auc", callbacks=callbacks
-                )
-                print("Fitted with callbacks early stopping.")
-            else:
-                # callbacks api not available - fallback to fit without early stopping
-                raise RuntimeError("No early stopping callbacks available")
-        except Exception as e2:
-            print("Callbacks early stopping failed or not available:", e2)
-            print("Falling back to plain fit() without early stopping.")
-            clf.fit(X_train_arr, y_train)
-    except Exception as e:
-        # unexpected other exceptions -> fallback to plain fit
-        print("Unexpected error when trying to fit with early stopping:", e)
-        print("Falling back to plain fit() without early stopping.")
-        clf.fit(X_train_arr, y_train)
-
+    clf.fit(
+        X_train_arr,
+        y_train,
+        eval_set=[(X_val_arr, y_val)],
+        eval_metric="auc",
+        callbacks=[lgb.early_stopping(EARLY_STOPPING_ROUNDS, verbose=False)],
+    )
+    print(f"Early stopping: best iteration {clf.best_iteration_} of {params['n_estimators']}")
     return clf
 
 
-def evaluate(pipe, X_test, y_test, threshold=0.5):
-    """
-    Robust evaluate: ensures shapes, flattens arrays and gives helpful diagnostics
-    before calling sklearn metrics.
-    Returns (summary_dict, probs_array)
-    """
-    # Получаем массив вероятностей класcа 1
-    try:
-        probs_raw = pipe.predict_proba(X_test)
-        # иногда predict_proba может вернуть массив 1D или 2D; приводим к 1D массива положительного класса
-        probs = None
-        pr = np.asarray(probs_raw)
-        if pr.ndim == 1:
-            # если модель вернула одномерный массив — используем его как score
-            probs = pr.ravel()
-        elif pr.ndim == 2:
-            if pr.shape[1] == 1:
-                probs = pr.ravel()
-            else:
-                # ожидаем, что класс 1 в колонке 1
-                probs = pr[:, 1].ravel()
-        else:
-            # неожиданный формат
-            probs = pr.ravel()
-    except Exception as e_pp:
-        # попробуем вызвать predict_proba на numpy values (иногда ColumnTransformer/DF влияет)
-        try:
-            probs = np.asarray(pipe.predict_proba(X_test.values))[:, 1].ravel()
-        except Exception as e2:
-            raise RuntimeError(f"predict_proba failed: {e_pp}; fallback failed: {e2}")
+def refit_lgbm(X_arr, y, n_estimators, params=None):
+    """Stage B: fit on all labeled rows with a fixed number of trees (no validation block left)."""
+    params = dict(LGBM_PARAMS if params is None else params, n_estimators=int(n_estimators))
+    print(f"Refit on {len(y)} labeled rows with {params['n_estimators']} trees")
+    clf = lgb.LGBMClassifier(**params)
+    clf.fit(X_arr, y)
+    return clf
 
-    # Приводим y_test к numpy 1D
+
+def scale_trees(best_iteration, n_train, n_refit):
+    """Trees for the refit: the stage-A optimum, scaled to the bigger training set."""
+    return max(50, int(round(best_iteration * n_refit / max(n_train, 1))))
+
+
+def evaluate(pipe, X_test, y_test, threshold=0.5):
+    """Metrics on the held-out split. Returns (summary_dict, probs_array)."""
+    probs = np.asarray(pipe.predict_proba(X_test))[:, 1].astype(float)
     y_arr = np.asarray(y_test).ravel()
 
-    # Диагностика длин/типов
-    if probs.shape[0] != y_arr.shape[0]:
-        # печатаем подробную диагностику и бросаем явную ошибку
-        raise RuntimeError(
-            "Length mismatch between y_test and predicted probs: "
-            f"len(y_test)={y_arr.shape[0]}, len(probs)={probs.shape[0]}. "
-            "Investigate pipeline.predict_proba output. "
-            f"probs.shape={probs.shape}, probs.dtype={probs.dtype}"
-        )
+    finite = np.isfinite(probs)
+    if not finite.all():
+        probs, y_arr = probs[finite], y_arr[finite]
 
-    # Удаляем NaN / inf если вдруг
-    mask_valid = np.isfinite(probs)
-    if not np.all(mask_valid):
-        # если здесь удаляем, то синхронно уменьшаем y_arr
-        probs = probs[mask_valid]
-        y_arr = y_arr[mask_valid]
-
-    # final safety cast to float
-    probs = probs.astype(float)
-
-    # вычисляем метрики
     preds = (probs >= threshold).astype(int)
-    report = classification_report(y_arr, preds, output_dict=True, zero_division=0)
-
-    # roc_auc_score может упасть, если все y одинаковы — ловим исключение
-    try:
-        roc = float(roc_auc_score(y_arr, probs))
-    except Exception as e_roc:
-        roc = None
-        print("[evaluate] roc_auc_score failed:", e_roc)
-
-    try:
-        prec, rec, thr = precision_recall_curve(y_arr, probs)
-        pr_auc = float(auc(rec, prec))
-    except Exception as e_pr:
-        prec, rec, thr = None, None, None
-        pr_auc = None
-        print("[evaluate] precision_recall_curve failed:", e_pr)
-
-    cm = confusion_matrix(y_arr, preds)
     summary = {
-        "classification_report": report,
-        "roc_auc": roc,
-        "pr_auc": pr_auc,
-        "confusion_matrix": cm.tolist(),
-        "probs_min": float(np.min(probs)) if probs.size else None,
-        "probs_max": float(np.max(probs)) if probs.size else None,
-        "probs_mean": float(np.mean(probs)) if probs.size else None,
+        "threshold": threshold,
+        "classification_report": classification_report(
+            y_arr, preds, output_dict=True, zero_division=0
+        ),
+        "roc_auc": float(roc_auc_score(y_arr, probs)),
+        "pr_auc": float(average_precision_score(y_arr, probs)),  # average precision
+        "confusion_matrix": confusion_matrix(y_arr, preds).tolist(),
+        "probs_min": float(probs.min()),
+        "probs_max": float(probs.max()),
+        "probs_mean": float(probs.mean()),
         "n_test": int(len(y_arr)),
     }
     return summary, probs
 
-def build_pipeline_and_train(df, target_col="is_fraud", out_dir="artifacts", sample_frac=None):
+
+def build_pipeline_and_train(
+    df,
+    target_col="is_fraud",
+    out_dir="artifacts",
+    sample_frac=None,
+    label_delay_days=DEFAULT_LABEL_DELAY_DAYS,
+):
     df = df.copy()
     if sample_frac is not None and 0 < sample_frac < 1:
         df = df.sample(frac=sample_frac, random_state=42).reset_index(drop=True)
 
-    # decide features
-    all_cols = [c for c in df.columns if c != target_col]
-    categorical = [
-        c
-        for c in ["mcc", "country_risk", "receiver_new", "device_new", "is_foreign"]
-        if c in all_cols
-    ]
+    # features = every prepared column except the label and the TransactionDT split column
+    all_cols = [c for c in model_columns(df) if c != target_col]
+    categorical = [c for c in all_cols if c in CATEGORICAL_NAMES]
     numeric = [c for c in all_cols if c not in categorical]
+    print(f"Features: {len(numeric)} numeric, {len(categorical)} categorical")
 
-    print("Numeric features:", numeric[:10])
-    print("Categorical features:", categorical)
+    train_df, val_df, test_df = split_data(df, label_delay_days)
+    labeled_df = labeled_rows(df, label_delay_days)
 
-    X = df[numeric + categorical]
-    y = df[target_col].astype(int)
+    def features_of(part):
+        X = part[numeric + categorical].copy()
+        for c in categorical:  # same labelling code as serving (fraud_app.features)
+            X[c] = category_labels(X[c])
+        return X
 
-    # split
-    X_temp, X_test, y_temp, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42, stratify=y
+    X_train, X_val, X_test = features_of(train_df), features_of(val_df), features_of(test_df)
+    y_train = train_df[target_col].astype(int)
+    y_val = val_df[target_col].astype(int)
+    y_test = test_df[target_col].astype(int)
+    print(
+        f"Rows: train={len(y_train)} val={len(y_val)} test={len(y_test)} | "
+        f"labeled (refit)={len(labeled_df)} | label delay {label_delay_days:g} d | "
+        f"fraud rate train={y_train.mean():.4f} val={y_val.mean():.4f} test={y_test.mean():.4f}"
     )
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_temp, y_temp, test_size=0.25, random_state=42, stratify=y_temp
+
+    # ---- Stage A: early stopping, validation scores (threshold + honest estimate)
+    preproc_a = build_preprocessor(numeric, categorical, impute=False)
+    X_train_t = preproc_a.fit_transform(X_train)
+    X_val_t = preproc_a.transform(X_val)
+    print("Stage A matrix:", X_train_t.shape)
+    clf_a = train_lgbm(X_train_t, y_train, X_val_t, y_val)
+    val_probs = clf_a.predict_proba(X_val_t)[:, 1]
+    val_summary = {
+        "roc_auc": float(roc_auc_score(y_val, val_probs)),
+        "pr_auc": float(average_precision_score(y_val, val_probs)),
+        "n_val": int(len(y_val)),
+    }
+    print(
+        f"Validation (stage A model): ROC-AUC={val_summary['roc_auc']:.4f} "
+        f"PR-AUC={val_summary['pr_auc']:.4f}"
     )
 
-    # IMPORTANT: make sure categorical columns are strings -> allows fill_value='NA'
-    for D in (X_train, X_val, X_test):
-        for c in categorical:
-            if c in D.columns:
-                D[c] = D[c].fillna("NA").astype(str)
+    # ---- Stage B: refit on every labeled row
+    n_trees = scale_trees(clf_a.best_iteration_, len(y_train), len(labeled_df))
+    X_lab = features_of(labeled_df)
+    y_lab = labeled_df[target_col].astype(int)
+    preproc = build_preprocessor(numeric, categorical, impute=False)
+    X_lab_t = preproc.fit_transform(X_lab)
+    clf = refit_lgbm(X_lab_t, y_lab, n_trees)
 
-    preproc = build_preprocessor(numeric, categorical)
-
-    # Fit preprocessor on training data (categoricals are strings now)
-    print("Fitting preprocessor on training data...")
-    preproc.fit(X_train)
-
-    # transform
-    X_train_trans = preproc.transform(X_train)
-    X_val_trans = preproc.transform(X_val)
-
-    # train LGBM on transformed arrays (with safe early stopping fallback)
-    clf = train_lgbm(X_train_trans, y_train, X_val_trans, y_val)
-
-    # build final pipeline: preproc + trained clf
+    # final pipeline: preprocessing + refit classifier
     pipe = Pipeline([("preproc", preproc), ("clf", clf)])
 
-    # evaluate
-    eval_summary, probs = evaluate(pipe, X_test, y_test)
+    eval_summary, _ = evaluate(pipe, X_test, y_test)
+    eval_summary["validation_stage_a"] = val_summary
 
     # save artifacts
     out_dir = Path(out_dir)
@@ -281,14 +209,30 @@ def build_pipeline_and_train(df, target_col="is_fraud", out_dir="artifacts", sam
     report_path = out_dir / "train_report_ieee.json"
 
     joblib.dump(pipe, pipe_path)
+    timed = "TransactionDT" in df.columns
     meta = {
         "features": numeric + categorical,
+        "numeric": numeric,
+        "categorical": categorical,
         "target": target_col,
+        "split": (
+            "chronological by TransactionDT, newest 20% is the test set"
+            if timed
+            else "random stratified 60/20/20"
+        ),
+        "protocol": "train | label-delay gap | validation, then refit on all labeled rows",
+        "label_delay_days": float(label_delay_days) if timed else 0.0,
+        "best_iteration_stage_a": int(clf_a.best_iteration_),
+        "n_estimators": int(n_trees),
         "n_train": int(len(y_train)),
         "n_val": int(len(y_val)),
+        "n_refit": int(len(y_lab)),
         "n_test": int(len(y_test)),
     }
     joblib.dump(meta, meta_path)
+    # the refit model has seen the validation rows, so the threshold must be chosen from the
+    # stage-A scores of the validation block
+    np.savez(out_dir / VAL_SCORES_FILE, y=y_val.to_numpy(), p=val_probs)
 
     with open(report_path, "w") as f:
         json.dump(eval_summary, f, indent=2)
@@ -296,14 +240,17 @@ def build_pipeline_and_train(df, target_col="is_fraud", out_dir="artifacts", sam
     print("Saved pipeline to:", pipe_path)
     print("Saved meta to:", meta_path)
     print("Saved report to:", report_path)
-    print("Evaluation summary:", eval_summary)
+    print(
+        f"Test ROC-AUC={eval_summary['roc_auc']:.4f} PR-AUC={eval_summary['pr_auc']:.4f} "
+        f"(n_test={eval_summary['n_test']})"
+    )
 
-    # SHAP (optional)
+    # SHAP (optional). A small background keeps each per-request explanation fast.
     shap_path = out_dir / "shap_explainer_ieee.joblib"
     if SHAP_AVAILABLE:
         try:
             print("Building SHAP TreeExplainer (may take time)...")
-            X_bg = X_train.sample(n=min(2000, len(X_train)), random_state=42)
+            X_bg = X_lab.sample(n=min(100, len(X_lab)), random_state=42)
             X_bg_trans = preproc.transform(X_bg)
             explainer = shap.TreeExplainer(
                 clf, data=X_bg_trans, feature_perturbation="interventional"
@@ -325,10 +272,19 @@ def main():
     p.add_argument(
         "--sample", type=float, default=None, help="optional fraction to sample for quick runs"
     )
+    p.add_argument(
+        "--label-delay-days",
+        type=float,
+        default=DEFAULT_LABEL_DELAY_DAYS,
+        help="days before the test period from which labels are treated as unknown "
+        f"(default {DEFAULT_LABEL_DELAY_DAYS:g})",
+    )
     args = p.parse_args()
 
     df = load_data(args.input)
-    build_pipeline_and_train(df, out_dir=args.out_dir, sample_frac=args.sample)
+    build_pipeline_and_train(
+        df, out_dir=args.out_dir, sample_frac=args.sample, label_delay_days=args.label_delay_days
+    )
     print("Done.")
 
 

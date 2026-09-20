@@ -15,6 +15,7 @@ Used by fraud_app.api.
 from __future__ import annotations
 
 import json
+import math
 import subprocess
 import sys
 from datetime import datetime
@@ -24,6 +25,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import joblib
 import numpy as np
 import pandas as pd
+
+from . import schema
+from .explain import explain_row
+from .features import categorical_features, handles_missing, prepare_features, split_data
 
 # ==== paths ====
 
@@ -56,14 +61,23 @@ THRESHOLD: Optional[float] = None
 
 
 def numpy_to_native(x: Any) -> Any:
-    """Convert numpy scalars/arrays to Python native types for JSON."""
-    if isinstance(x, (np.floating, np.float32, np.float64)):
-        return float(x)
-    if isinstance(x, (np.integer, np.int32, np.int64)):
-        return int(x)
+    """Convert numpy scalars/arrays to Python native types for JSON (NaN/inf -> None)."""
     if isinstance(x, np.ndarray):
-        return x.tolist()
+        return [numpy_to_native(v) for v in x.tolist()]
+    if isinstance(x, np.generic):
+        x = x.item()
+    if isinstance(x, float) and not math.isfinite(x):
+        return None
     return x
+
+
+def json_safe(obj: Any) -> Any:
+    """Recursively make a structure valid JSON: NaN/inf become null (browsers reject NaN)."""
+    if isinstance(obj, dict):
+        return {k: json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [json_safe(v) for v in obj]
+    return numpy_to_native(obj)
 
 
 # ==== artifacts loading ====
@@ -188,7 +202,7 @@ def save_history_entry(entry: Dict[str, Any]) -> None:
         if HISTORY_FILE.exists():
             with open(HISTORY_FILE, "r", encoding="utf8") as f:
                 hist = json.load(f)
-        hist.insert(0, entry)
+        hist.insert(0, json_safe(entry))
         hist = hist[:200]
         with open(HISTORY_FILE, "w", encoding="utf8") as f:
             json.dump(hist, f, ensure_ascii=False, indent=2)
@@ -202,7 +216,7 @@ def load_history() -> List[Dict[str, Any]]:
         return []
     try:
         with open(HISTORY_FILE, "r", encoding="utf8") as f:
-            return json.load(f)
+            return json_safe(json.load(f))  # entries written by older versions may hold NaN
     except Exception as e:
         print("[services] load_history failed:", e)
         return []
@@ -234,26 +248,10 @@ def _get_feature_list_from_meta() -> List[str]:
 def ensure_features_df(df: pd.DataFrame) -> Tuple[pd.DataFrame, List[str]]:
     """
     Bring arbitrary input df to the model's expected feature set and order.
-    Missing columns are added with zeros; everything is cast to float64.
+    Columns the caller did not send are treated as missing (NaN / "NA"), which the model
+    handles natively. See fraud_app.features for the exact typing rules.
     """
-    feat_list = _get_feature_list_from_meta()
-
-    missing = [f for f in feat_list if f not in df.columns]
-    if missing:
-        print("[services.ensure_features_df] Adding missing features:", missing)
-        for m in missing:
-            df[m] = 0
-
-    X_safe = df[feat_list].copy()
-
-    for c in X_safe.columns:
-        try:
-            X_safe[c] = pd.to_numeric(X_safe[c], errors="coerce").astype(np.float64)
-        except Exception:
-            X_safe[c] = pd.to_numeric(X_safe[c].fillna(0), errors="coerce").astype(np.float64)
-
-    X_safe = X_safe.fillna(0.0)
-    return X_safe, feat_list
+    return prepare_features(df, _get_feature_list_from_meta(), PIPE)
 
 
 def compute_probs_from_pipeline(X_safe: pd.DataFrame) -> List[float]:
@@ -282,17 +280,33 @@ def compute_probs(X_safe: pd.DataFrame) -> List[float]:
 # ==== random row from dataset ====
 
 
+_DEMO_FRAME: Optional[pd.DataFrame] = None
+
+
+def _demo_frame() -> pd.DataFrame:
+    """
+    Rows for the "Random normal / Random fraud" buttons: the chronological TEST split, i.e.
+    transactions the model never saw. Loaded once (the CSV is large).
+    """
+    global _DEMO_FRAME
+    if _DEMO_FRAME is None:
+        if not DATASET_FILE.exists():
+            raise RuntimeError(f"Dataset not found: {DATASET_FILE}")
+        df = pd.read_csv(DATASET_FILE)
+        if "is_fraud" not in df.columns:
+            raise RuntimeError("Dataset has no 'is_fraud' column")
+        _, _, test = split_data(df)
+        _DEMO_FRAME = test.drop(columns=["TransactionDT"], errors="ignore").reset_index(drop=True)
+    return _DEMO_FRAME
+
+
 def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
     """
-    Sample a random row from data/ieee_prepared.csv.
-    If fraud == 0/1 — filter by is_fraud, otherwise use full dataset.
+    Sample a random held-out transaction.
+    If fraud == 0/1 - filter by is_fraud, otherwise use all rows.
+    Missing values are returned as None (JSON null).
     """
-    if not DATASET_FILE.exists():
-        raise RuntimeError(f"Dataset not found: {DATASET_FILE}")
-
-    df = pd.read_csv(DATASET_FILE)
-    if "is_fraud" not in df.columns:
-        raise RuntimeError("Dataset has no 'is_fraud' column")
+    df = _demo_frame()
 
     if fraud in (0, 1):
         subset = df[df["is_fraud"] == fraud]
@@ -303,10 +317,59 @@ def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
 
     row = subset.sample(n=1, random_state=None).iloc[0].to_dict()
     row.pop("is_fraud", None)
+    return {k: numpy_to_native(v) for k, v in row.items()}
 
-    for k, v in list(row.items()):
-        row[k] = numpy_to_native(v)
-    return row
+
+# ==== form schema for the UI ====
+
+
+def _category_options() -> Dict[str, List[str]]:
+    """
+    Category values worth offering for each one-hot encoded column: the ones the fitted pipeline
+    keeps as their own category. Rare values are pooled into one "infrequent" bucket by the
+    encoder, so listing hundreds of them (device models, screen sizes) would only bloat the form.
+    """
+    if PIPE is None or not categorical_features(PIPE):
+        return {}
+    for name, trans, cols in PIPE.steps[0][1].transformers_:
+        if name == "cat":
+            ohe = trans.named_steps["ohe"]
+            infrequent = getattr(ohe, "infrequent_categories_", None) or [None] * len(cols)
+            options: Dict[str, List[str]] = {}
+            for col, cats, rare in zip(cols, ohe.categories_, infrequent):
+                rare_set = {str(v) for v in rare} if rare is not None else set()
+                known = [str(v) for v in cats if str(v) != "NA"]  # "NA" == leave the field empty
+                options[col] = [v for v in known if v not in rare_set] or known
+            return options
+    return {}
+
+
+def build_schema() -> Dict[str, Any]:
+    """Grouped description of the model's input features, used to build the UI form."""
+    feats = _get_feature_list_from_meta()
+    cats = set(categorical_features(PIPE)) if PIPE is not None else set()
+    options = _category_options()
+
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for name in feats:
+        spec = schema.describe(name)
+        item: Dict[str, Any] = {
+            "name": name,
+            "label": spec.label,
+            "help": spec.help,
+            "kind": schema.CATEGORICAL if name in cats else schema.NUMERIC,
+        }
+        if name in cats:
+            item["options"] = [
+                {"value": v, "label": spec.option_labels.get(v, v)} for v in options.get(name, [])
+            ]
+        groups.setdefault(spec.group, []).append(item)
+
+    ordered = sorted(groups, key=schema.group_index)
+    return {
+        "n_features": len(feats),
+        "groups": [{"name": g, "features": groups[g]} for g in ordered],
+    }
 
 
 # ==== SHAP inline (no worker, optional) ====
@@ -315,69 +378,13 @@ def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
 def compute_shap_for_df(df_safe: pd.DataFrame) -> Dict[str, Any]:
     """
     Compute SHAP values in-process for a single row (df_safe already
-    prepared by ensure_features_df). Uses check_additivity=False to
-    avoid fragile internal SHAP checks.
+    prepared by ensure_features_df).
 
     Not used by blueprint now (we use worker), but kept as a helper.
     """
-    global SHAP_EXPLAINER
-    if SHAP_EXPLAINER is None:
-        raise RuntimeError("SHAP explainer not loaded")
-
-    vals = SHAP_EXPLAINER(df_safe.values, check_additivity=False)
-
-    base_value = None
-    if hasattr(vals, "base_values"):
-        base_value = vals.base_values
-    elif hasattr(vals, "expected_value"):
-        base_value = vals.expected_value
-
-    # normalize to numpy array
-    if isinstance(vals, (list, tuple)):
-        shap_values = np.array(vals[0]) if len(vals) == 1 else np.array(vals)
-    elif hasattr(vals, "values"):
-        shap_values = np.asarray(vals.values)
-    else:
-        shap_values = np.asarray(vals)
-
-    if shap_values.ndim == 3:
-        # (n_classes, n_samples, n_features)
-        if shap_values.shape[0] >= 2:
-            sv = shap_values[1][0]
-        else:
-            sv = shap_values[0][0]
-    elif shap_values.ndim == 2:
-        sv = shap_values[0]
-    elif shap_values.ndim == 1:
-        sv = shap_values
-    else:
-        raise RuntimeError(f"Unexpected SHAP values shape: {shap_values.shape}")
-
-    feat_names = list(df_safe.columns)
-    out: Dict[str, Any] = {"base_value": numpy_to_native(base_value), "shap": []}
-
-    for i, feat in enumerate(feat_names):
-        try:
-            v = df_safe.iloc[0, i]
-            v = numpy_to_native(v)
-        except Exception:
-            v = None
-
-        s_val = sv[i] if i < len(sv) else None
-        try:
-            s_val = float(s_val)
-        except Exception:
-            s_val = None
-
-        out["shap"].append(
-            {
-                "feature": feat,
-                "shap": s_val,
-                "value": v,
-            }
-        )
-
-    return out
+    if SHAP_EXPLAINER is None or PIPE is None:
+        raise RuntimeError("SHAP explainer or pipeline not loaded")
+    return explain_row(PIPE, SHAP_EXPLAINER, df_safe)
 
 
 # ==== SHAP via worker process ====
@@ -402,7 +409,8 @@ def compute_shap_for_df_via_worker(df_safe: pd.DataFrame, timeout: int = 15) -> 
 
     try:
         proc = subprocess.Popen(
-            [sys.executable, str(SHAP_WORKER_FILE)],
+            [sys.executable, "-m", "fraud_app.shap_worker"],
+            cwd=str(ROOT_DIR),
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
