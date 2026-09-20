@@ -55,11 +55,19 @@ def generate_dummy_artifacts():
     joblib.dump(meta, ARTIFACTS_DIR / "meta_ieee.joblib")
 
     # Save metrics
+    # same shape as eval_model_metrics.py writes (the UI reads these keys)
     metrics = {
-        "roc_auc": 0.8,
-        "pr_auc": 0.6,
-        "classification_report": {},
-        "confusion_matrix": [[40, 10], [10, 40]]
+        "samples": 100,
+        "fraud_rate": 0.5,
+        "global_metrics": {"roc_auc": 0.8, "pr_auc": 0.6},
+        "threshold_metrics": {
+            "threshold": 0.5,
+            "accuracy": 0.8,
+            "precision": 0.8,
+            "recall": 0.8,
+            "f1": 0.8,
+            "confusion_matrix": {"TN": 40, "FP": 10, "FN": 10, "TP": 40},
+        },
     }
     with open(ARTIFACTS_DIR / "metrics_ieee.json", "w") as f:
         json.dump(metrics, f)

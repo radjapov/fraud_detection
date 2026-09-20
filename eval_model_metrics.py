@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Evaluate the IEEE LGBM pipeline and export metrics to artifacts/metrics_ieee.json.
+Evaluate the IEEE LGBM pipeline on the held-out TEST split (same split as
+train_ieee_lgbm.py) and export metrics to artifacts/metrics_ieee.json.
 
 Usage:
     python3 eval_model_metrics.py
@@ -13,18 +14,20 @@ import joblib
 import numpy as np
 import pandas as pd
 from sklearn.metrics import (
-    auc,
+    average_precision_score,
     classification_report,
     confusion_matrix,
-    precision_recall_curve,
     roc_auc_score,
 )
+
+from fraud_app.features import TARGET, label_delay_of, prepare_features, split_data
 
 # Paths
 BASE_DIR = Path(__file__).resolve().parent
 DATA_PATH = BASE_DIR / "data" / "ieee_prepared.csv"
 ARTIFACTS_DIR = BASE_DIR / "artifacts"
 PIPELINE_PATH = ARTIFACTS_DIR / "pipeline_ieee.joblib"
+META_PATH = ARTIFACTS_DIR / "meta_ieee.joblib"
 THRESHOLD_JSON = ARTIFACTS_DIR / "meta_ieee_threshold.json"
 METRICS_JSON = ARTIFACTS_DIR / "metrics_ieee.json"
 
@@ -56,35 +59,15 @@ def manual_roc_auc(y_true, y_score):
 
 
 def manual_pr_auc(y_true, y_score):
-    """Compute PR-AUC manually when sklearn fails."""
+    """Average precision (mean precision at each true positive) when sklearn fails."""
     y_true = np.asarray(y_true)
-    y_score = np.asarray(y_score)
-
-    order = np.argsort(-y_score)
-    y_true = y_true[order]
-
-    P = (y_true == 1).sum()
-    if P == 0:
+    order = np.argsort(-np.asarray(y_score), kind="stable")
+    y_sorted = y_true[order]
+    n_pos = int((y_sorted == 1).sum())
+    if n_pos == 0:
         return float("nan")
-
-    tp = 0
-    fp = 0
-    precisions = []
-    recalls = []
-
-    for value in y_true:
-        if value == 1:
-            tp += 1
-        else:
-            fp += 1
-        precisions.append(tp / (tp + fp))
-        recalls.append(tp / P)
-
-    recalls = np.asarray(recalls)
-    precisions = np.asarray(precisions)
-
-    order_r = np.argsort(recalls)
-    return float(np.trapz(precisions[order_r], recalls[order_r]))
+    ranks = np.flatnonzero(y_sorted == 1) + 1  # 1-based rank of every positive
+    return float(np.mean(np.arange(1, n_pos + 1) / ranks))
 
 
 # -------------------------
@@ -118,12 +101,18 @@ def main():
     if "is_fraud" not in df.columns:
         raise RuntimeError("Column 'is_fraud' missing from dataset.")
 
-    y = df["is_fraud"].astype(int).values
-    X = df.drop(columns=["is_fraud"])
-
     # Load model
     print(f"[model] Loading pipeline from {PIPELINE_PATH} ...")
     pipe = joblib.load(PIPELINE_PATH)
+
+    # Only the held-out test rows: the model never saw them, and the threshold
+    # was chosen on the validation split.
+    delay = label_delay_of(joblib.load(META_PATH) if META_PATH.exists() else None)
+    _, _, test = split_data(df, delay)
+    print(f"[data] Evaluating on test split: {len(test)} of {len(df)} rows (label delay {delay:g}d)")
+    y = test[TARGET].astype(int).values
+    feat_list = list(getattr(pipe, "feature_names_in_", [c for c in df.columns if c != TARGET]))
+    X, _ = prepare_features(test, feat_list, pipe)
 
     # Predict probabilities
     print("[model] Computing predict_proba ...")
@@ -140,8 +129,7 @@ def main():
         roc_auc = manual_roc_auc(y, probs)
 
     try:
-        prec, rec, _ = precision_recall_curve(y, probs)
-        pr_auc = float(auc(rec, prec))
+        pr_auc = float(average_precision_score(y, probs))
     except Exception as e:
         print(f"[metric] PR-AUC failed: {e}, using manual PR-AUC.")
         pr_auc = manual_pr_auc(y, probs)
@@ -164,6 +152,8 @@ def main():
 
     # --- Save JSON ---
     metrics = {
+        "split": "test",
+        "label_delay_days": delay,
         "samples": n_samples,
         "fraud_rate": fraud_rate,
         "probability_stats": {
@@ -190,6 +180,27 @@ def main():
             "classification_report": report,
         },
     }
+
+    # Validation block scored by the stage-A model (before the refit): the honest expectation.
+    val_file = ARTIFACTS_DIR / "val_scores_ieee.npz"
+    if val_file.exists():
+        vs = np.load(val_file)
+        yv, pv = vs["y"].astype(int), vs["p"].astype(float)
+        vpred = (pv >= threshold).astype(int)
+        vtp = int(((vpred == 1) & (yv == 1)).sum())
+        vfp = int(((vpred == 1) & (yv == 0)).sum())
+        vfn = int(((vpred == 0) & (yv == 1)).sum())
+        vprec = vtp / max(vtp + vfp, 1)
+        vrec = vtp / max(vtp + vfn, 1)
+        metrics["validation"] = {
+            "samples": int(len(yv)),
+            "roc_auc": float(roc_auc_score(yv, pv)),
+            "pr_auc": float(average_precision_score(yv, pv)),
+            "threshold": threshold,
+            "precision": vprec,
+            "recall": vrec,
+            "f1": 2 * vprec * vrec / max(vprec + vrec, 1e-12),
+        }
 
     ARTIFACTS_DIR.mkdir(exist_ok=True)
     with open(METRICS_JSON, "w") as f:

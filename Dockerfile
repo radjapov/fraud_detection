@@ -1,9 +1,8 @@
 # Dockerfile
 # Multi-stage: сборочный этап ставит билдер-зависимости, затем финальный образ - облегчённый
-# Используем python:3.10-slim (совместим с numba/llvmlite и shap в большинстве случаев).
-# Если у тебя уже есть готовые артефакты, советую не устанавливать shap (см. env DISABLE_SHAP)
+# python:3.12-slim (тот же Python, что в .venv/uv; версии библиотек закреплены в requirements.txt).
 
-ARG PYTHON_VER=3.10
+ARG PYTHON_VER=3.12
 FROM python:${PYTHON_VER}-slim AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -25,8 +24,8 @@ FROM python:${PYTHON_VER}-slim
 ENV PYTHONUNBUFFERED=1
 ENV PATH="/root/.local/bin:${PATH}"
 
-# опционально: чтобы быстро отключать SHAP
-ENV DISABLE_SHAP=0
+# опубликовать порт наружу (локально по умолчанию слушаем только 127.0.0.1)
+ENV FRAUD_HOST=0.0.0.0
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \

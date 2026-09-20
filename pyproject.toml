@@ -18,6 +18,7 @@ dependencies = [
 dev = [
     "black",
     "isort",
+    "pytest",
 ]
 
 [tool.uv]
@@ -31,4 +32,8 @@ skip-string-normalization = true
 [tool.isort]
 profile = "black"
 line_length = 100
-known_first_party = ["fraud_ui"]
+known_first_party = ["fraud_app"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
