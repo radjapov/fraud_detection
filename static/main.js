@@ -38,45 +38,112 @@ document.addEventListener("DOMContentLoaded", () => {
   const mFN = document.getElementById("m-fn");
   const mTP = document.getElementById("m-tp");
   const mThr = document.getElementById("m-threshold");
+  const mDelay = document.getElementById("m-delay");
+  const mValF1 = document.getElementById("m-val-f1");
 
   let lastPayload = null;
   let lastPrediction = null;
 
   // ---- helpers ----
+  const featureGroupsEl = document.getElementById("feature-groups");
+  const schemaMessage = document.getElementById("schema-message");
+  let schemaFeatures = []; // [{name, kind, options?}] in form order, filled from /api/schema
+
+  function buildForm(schema) {
+    schemaFeatures = [];
+    featureGroupsEl.innerHTML = "";
+
+    (schema.groups || []).forEach((group, idx) => {
+      const details = document.createElement("details");
+      details.className = "feature-group";
+      details.open = idx < 2; // the first groups are the ones people fill by hand
+
+      const summary = document.createElement("summary");
+      summary.textContent = group.name + " (" + group.features.length + ")";
+      details.appendChild(summary);
+
+      const grid = document.createElement("div");
+      grid.className = "form-grid";
+
+      group.features.forEach((f) => {
+        schemaFeatures.push(f);
+        const row = document.createElement("div");
+        row.className = "form-row";
+
+        const label = document.createElement("label");
+        label.htmlFor = f.name;
+        label.textContent = f.label;
+        if (f.help) label.title = f.help;
+
+        let input;
+        if (f.kind === "categorical" && Array.isArray(f.options) && f.options.length > 0) {
+          input = document.createElement("select");
+          const blank = document.createElement("option");
+          blank.value = "";
+          blank.textContent = "—";
+          input.appendChild(blank);
+          f.options.forEach((o) => {
+            const opt = document.createElement("option");
+            opt.value = o.value;
+            opt.textContent = o.label;
+            input.appendChild(opt);
+          });
+        } else {
+          input = document.createElement("input");
+          input.type = "number";
+          input.step = "any";
+        }
+        input.id = f.name;
+        input.name = f.name;
+        if (f.help) input.title = f.help;
+
+        row.appendChild(label);
+        row.appendChild(input);
+        grid.appendChild(row);
+      });
+
+      details.appendChild(grid);
+      featureGroupsEl.appendChild(details);
+    });
+
+    schemaMessage.textContent = schema.n_features
+      ? "Leave a field empty when the value is unknown: the model treats it as missing."
+      : "No features available.";
+  }
+
+  function loadSchema() {
+    return fetch("/api/schema")
+      .then((r) => r.json())
+      .then((schema) => {
+        if (schema.error) throw new Error(schema.error);
+        buildForm(schema);
+      })
+      .catch((err) => {
+        console.error("schema error:", err);
+        schemaMessage.textContent = "Could not load the feature list.";
+      });
+  }
+
   function getFormPayload() {
-    const ids = [
-      "amount",
-      "hour",
-      "card_age_months",
-      "sender_txn_24h",
-      "sender_avg_amount",
-      "distance_km",
-      "ip_risk",
-      "mcc",
-      "country_risk",
-      "receiver_new",
-      "device_new",
-      "is_foreign",
-    ];
     const payload = {};
-    ids.forEach((id) => {
-      const el = document.getElementById(id);
+    schemaFeatures.forEach((f) => {
+      const el = document.getElementById(f.name);
       if (!el) return;
       const val = el.value;
 
       if (val === "" || val === null || typeof val === "undefined") {
-        return; // skip empty
+        return; // empty = unknown, the server treats it as a missing value
       }
 
       if (el.type === "number") {
         const num = Number(val);
         if (!Number.isNaN(num)) {
-          payload[id] = num;
+          payload[f.name] = num;
         }
       } else {
-        // select
+        // select: numeric codes stay numbers, text categories (gmail.com, visa) stay strings
         const num = Number(val);
-        payload[id] = Number.isNaN(num) ? val : num;
+        payload[f.name] = Number.isNaN(num) ? val : num;
       }
     });
     return payload;
@@ -84,9 +151,21 @@ document.addEventListener("DOMContentLoaded", () => {
 
   function fillFormFromRow(row) {
     if (!row || typeof row !== "object") return;
-    Object.entries(row).forEach(([key, value]) => {
-      const el = document.getElementById(key);
+    schemaFeatures.forEach((f) => {
+      const el = document.getElementById(f.name);
       if (!el) return;
+      const value = row[f.name];
+      if (value === null || typeof value === "undefined") {
+        el.value = "";
+        return;
+      }
+      if (el.tagName === "SELECT" && !Array.from(el.options).some((o) => o.value === String(value))) {
+        // a category the model has not seen in training: keep it visible instead of dropping it
+        const opt = document.createElement("option");
+        opt.value = String(value);
+        opt.textContent = String(value);
+        el.appendChild(opt);
+      }
       el.value = value;
     });
   }
@@ -171,6 +250,12 @@ document.addEventListener("DOMContentLoaded", () => {
       });
   }
 
+  function formatValue(v) {
+    if (v === null || v === undefined) return "–";
+    if (typeof v === "number" && !Number.isInteger(v)) return String(Number(v.toPrecision(5)));
+    return String(v);
+  }
+
   // ---- SHAP horizontal bar chart ----
   function renderShapChart(shapData) {
     clearShapChart();
@@ -203,13 +288,13 @@ document.addEventListener("DOMContentLoaded", () => {
 
     ctx.clearRect(0, 0, W, H);
 
-    const paddingLeft = 100;
-    const paddingRight = 40;
+    const paddingLeft = 140;
+    const paddingRight = 60;
     const paddingTop = 20;
     const paddingBottom = 20;
 
     const zeroX = Math.round((paddingLeft + (W - paddingRight)) / 2); // center line
-    const maxBarWidth = (W - paddingLeft - paddingRight) / 2;
+    const maxBarWidth = (W - paddingLeft - paddingRight) / 2 - 45;
 
     const barAreaHeight = H - paddingTop - paddingBottom;
     const n = top.length;
@@ -295,8 +380,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const right = document.createElement("span");
       right.className = "shap-item-input";
-      right.textContent =
-        item.value !== null && item.value !== undefined ? String(item.value) : "–";
+      right.textContent = formatValue(item.value);
 
       li.appendChild(left);
       li.appendChild(mid);
@@ -367,6 +451,9 @@ function renderMetrics(m) {
   mTP.textContent = "TP: " + (tp != null ? tp.toLocaleString("en-US") : "–");
 
   mThr.textContent = threshold != null ? threshold.toFixed(3) : "–";
+  mDelay.textContent = m.label_delay_days != null ? String(m.label_delay_days) : "–";
+  const valF1 = m.validation ? m.validation.f1 : null;
+  mValF1.textContent = valF1 != null ? valF1.toFixed(4) : "–";
 }
 
 function fetchMetrics() {
@@ -493,6 +580,7 @@ function fetchMetrics() {
   });
 
   // initial loads
+  loadSchema();
   fetchHistory();
   fetchMetrics();
 });

@@ -1,4 +1,3 @@
-version: "3.8"
 services:
   fraud-ui:
     build:
@@ -8,8 +7,7 @@ services:
     ports:
       - "5001:5001"
     environment:
-      - DISABLE_SHAP=0        # установи 1 если не хочешь загружать shap
-      - FLASK_ENV=production
+      # FRAUD_ADMIN_TOKEN=...   # нужен, чтобы менять порог по HTTP не с localhost
     volumes:
       - ./artifacts:/app/artifacts:rw     # если есть готовые pipeline/meta/shap — монтируй сюда
       - ./data:/app/data:ro

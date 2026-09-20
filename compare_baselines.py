@@ -2,6 +2,10 @@
 """
 compare_baselines.py — Baseline model comparison for FraudDetect.
 
+Same protocol as production (see train_ieee_lgbm.py): chronological split with a label delay,
+fit on the training block, threshold on the gap-separated validation block, then refit on all
+labeled rows and score the test period.
+
 NOTE: Uses manual ROC-AUC and PR-AUC implementations to work around
 a sklearn bug in _binary_clf_curve on Python 3.14 / numpy 2.x
 (IndexError: index N is out of bounds for axis 0 with size N).
@@ -17,14 +21,24 @@ import time
 import warnings
 from pathlib import Path
 
+import joblib
 import numpy as np
 import pandas as pd
-from sklearn.impute import SimpleImputer
+from sklearn.base import clone
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score, precision_score, recall_score
-from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+
+from fraud_app.features import (
+    DEFAULT_LABEL_DELAY_DAYS,
+    build_preprocessor,
+    category_labels,
+    label_delay_of,
+    labeled_rows,
+    model_columns,
+    split_data,
+)
+from fraud_app.schema import CATEGORICAL_NAMES
 
 BASE_DIR     = Path(__file__).resolve().parent
 DATA_PATH    = BASE_DIR / "data" / "ieee_prepared.csv"
@@ -63,12 +77,14 @@ def calc_pr_auc(y_true: np.ndarray, y_score: np.ndarray) -> float:
 
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_pipe(estimator) -> Pipeline:
-    return Pipeline([
-        ("imputer", SimpleImputer(strategy="median")),
-        ("scaler",  StandardScaler()),
-        ("clf",     estimator),
-    ])
+# Boosted trees take NaN natively (missing stays a signal); the others need imputation.
+NAN_NATIVE = {"LightGBM", "XGBoost"}
+
+
+def make_pipe(name, estimator, numeric, categorical) -> Pipeline:
+    """Same preprocessing as production (fraud_app.features), imputing only where needed."""
+    pre = build_preprocessor(numeric, categorical, impute=name not in NAN_NATIVE)
+    return Pipeline([("preproc", pre), ("clf", estimator)])
 
 
 def best_threshold(y_true: np.ndarray, y_score: np.ndarray, steps: int = 200) -> float:
@@ -112,32 +128,30 @@ def get_models() -> list:
     except ImportError:
         pass
 
+    # lbfgs: same convex L2 problem as saga, but minutes faster on ~300 dense columns
     models.append(("LogisticRegression", LogisticRegression(
-        max_iter=3000, class_weight="balanced",
-        solver="saga", C=0.01, n_jobs=-1, random_state=RANDOM_STATE,
+        max_iter=500, class_weight="balanced",
+        solver="lbfgs", C=0.01, random_state=RANDOM_STATE,
     )))
 
     return models
 
 
-def evaluate(name, estimator, Xtr, ytr, Xval, yval, Xte, yte) -> dict:
+def evaluate(name, estimator, numeric, categorical, Xtr, ytr, Xval, yval, Xlab, ylab, Xte, yte) -> dict:
+    """Same protocol as production: fit on train, threshold on val, refit on all labeled rows."""
     print(f"\n[{name}] Training ...")
     t0   = time.perf_counter()
-    pipe = make_pipe(estimator)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        pipe.fit(Xtr, ytr)
+        stage_a = make_pipe(name, clone(estimator), numeric, categorical).fit(Xtr, ytr)
+        val_p = np.asarray(stage_a.predict_proba(Xval)[:, 1], dtype=np.float64)
+        thr   = best_threshold(yval, val_p)
+        final = make_pipe(name, clone(estimator), numeric, categorical).fit(Xlab, ylab)
+        te_p  = np.asarray(final.predict_proba(Xte)[:, 1], dtype=np.float64)
     elapsed = round(time.perf_counter() - t0, 2)
     print(f"[{name}] Done in {elapsed}s")
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        val_p = np.asarray(pipe.predict_proba(Xval)[:, 1], dtype=np.float64)
-        te_p  = np.asarray(pipe.predict_proba(Xte)[:, 1],  dtype=np.float64)
-
-    thr     = best_threshold(yval, val_p)
     te_pred = (te_p >= thr).astype(int)
-
     roc = calc_roc_auc(yte, te_p)
     pr  = calc_pr_auc(yte, te_p)
     pre = float(precision_score(yte, te_pred, zero_division=0))
@@ -157,27 +171,42 @@ def main():
     ap.add_argument("--data",     default=str(DATA_PATH))
     ap.add_argument("--out-json", default=str(OUT_JSON))
     ap.add_argument("--sample",   type=float, default=None)
+    ap.add_argument("--label-delay-days", type=float, default=None,
+                    help="default: the delay the production model was trained with")
     args = ap.parse_args()
 
     df = pd.read_csv(args.data)
     if args.sample:
         df = df.sample(frac=args.sample, random_state=RANDOM_STATE).reset_index(drop=True)
 
-    features = [c for c in df.columns if c != TARGET]
-    X = df[features].to_numpy(dtype=np.float64)
-    y = df[TARGET].to_numpy(dtype=np.int32)
-    print(f"[data] {len(y):,} rows | fraud rate {y.mean():.4f} | features: {len(features)}")
+    features = model_columns(df)
+    categorical = [c for c in features if c in CATEGORICAL_NAMES]
+    numeric = [c for c in features if c not in categorical]
+    delay = args.label_delay_days
+    if delay is None:
+        meta_path = BASE_DIR / "artifacts" / "meta_ieee.joblib"
+        delay = label_delay_of(joblib.load(meta_path)) if meta_path.exists() else DEFAULT_LABEL_DELAY_DAYS
+    train_df, val_df, test_df = split_data(df, delay)  # same chronological split as training
+    print(f"[split] label delay {delay:g} days")
 
-    Xtv, Xte, ytv, yte = train_test_split(
-        X, y, test_size=0.20, stratify=y, random_state=RANDOM_STATE)
-    Xtr, Xval, ytr, yval = train_test_split(
-        Xtv, ytv, test_size=0.15, stratify=ytv, random_state=RANDOM_STATE)
+    def xy(part):
+        X = part[numeric + categorical].copy()
+        for c in categorical:  # same labelling code as training / serving
+            X[c] = category_labels(X[c])
+        return X, part[TARGET].to_numpy(dtype=np.int32)
+
+    Xtr, ytr = xy(train_df)
+    Xval, yval = xy(val_df)
+    Xlab, ylab = xy(labeled_rows(df, delay))
+    Xte, yte = xy(test_df)
+    print(f"[data] {len(df):,} rows | fraud rate {df[TARGET].mean():.4f} | "
+          f"features: {len(numeric)} numeric + {len(categorical)} categorical")
     print(f"[split] train={len(ytr):,} val={len(yval):,} test={len(yte):,}")
 
     results = []
     for name, est in get_models():
         try:
-            results.append(evaluate(name, est, Xtr, ytr, Xval, yval, Xte, yte))
+            results.append(evaluate(name, est, numeric, categorical, Xtr, ytr, Xval, yval, Xlab, ylab, Xte, yte))
         except Exception as e:
             import traceback
             print(f"[{name}] FAILED: {e}")
@@ -196,7 +225,7 @@ def main():
 
     OUT_JSON.parent.mkdir(exist_ok=True)
     with open(args.out_json, "w") as f:
-        json.dump({"results": results}, f, indent=2)
+        json.dump({"label_delay_days": delay, "results": results}, f, indent=2)
     print(f"\n[done] → {args.out_json}")
 
 
