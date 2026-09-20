@@ -1,0 +1,9 @@
+.git
+.idea
+.venv
+__pycache__
+*.pyc
+.DS_Store
+# data and model artifacts are mounted by docker-compose, not baked into the image
+data
+artifacts

@@ -2,6 +2,7 @@
 fraud_app.api
 
 Blueprint with REST API:
+  GET  /api/schema
   GET  /api/random?fraud=0|1
   GET  /api/examples
   POST /api/predict
@@ -13,18 +14,23 @@ Blueprint with REST API:
 
 from __future__ import annotations
 
+import hmac
+import os
 import traceback
 from datetime import datetime
 from typing import Any, Dict, List
 
 import pandas as pd
 from flask import Blueprint, jsonify, request
+from werkzeug.exceptions import BadRequest
 
 from .services import (
     compute_probs_from_pipeline,
+    build_schema,
     compute_shap_for_df_via_worker,
     ensure_features_df,
     get_threshold,
+    json_safe,
     load_artifacts,
     load_history,
     load_metrics,
@@ -37,6 +43,16 @@ bp_api = Blueprint("api", __name__, url_prefix="/api")
 
 # Load artifacts once on import (pipeline, meta, shap explainer, threshold)
 load_artifacts()
+
+
+@bp_api.route("/schema", methods=["GET"])
+def api_schema():
+    """Grouped description of the model's input features (drives the UI form)."""
+    try:
+        return jsonify(build_schema())
+    except Exception as e:
+        print("[api_schema] error:", e)
+        return jsonify({"error": "Schema unavailable"}), 500
 
 
 @bp_api.route("/examples", methods=["GET"])
@@ -69,7 +85,7 @@ def api_random():
 
     try:
         row = load_random_row(fraud_val)
-        return jsonify({"row": row})
+        return jsonify({"row": json_safe(row)})
     except Exception as e:
         print("[api_random] error:", e)
         return jsonify({"error": str(e)}), 500
@@ -113,10 +129,12 @@ def api_predict():
             print("[api_predict] history save failed:", e_hist)
 
         return jsonify(result)
+    except BadRequest:
+        return jsonify({"error": "Request body must be valid JSON"}), 400
     except Exception:
-        tb = traceback.format_exc()
-        print("[api_predict] error:", tb)
-        return jsonify({"error": "Predict error", "traceback": tb}), 500
+        # full traceback goes to the server log only, never to the client
+        print("[api_predict] error:", traceback.format_exc())
+        return jsonify({"error": "Predict error"}), 500
 
 
 @bp_api.route("/shap", methods=["POST"])
@@ -139,11 +157,12 @@ def api_shap():
         safe_df, feat_list = ensure_features_df(raw_df.copy())
 
         shap_data = compute_shap_for_df_via_worker(safe_df)
-        return jsonify(shap_data)
+        return jsonify(json_safe(shap_data))
+    except BadRequest:
+        return jsonify({"error": "Request body must be valid JSON"}), 400
     except Exception:
-        tb = traceback.format_exc()
-        print("[api_shap] error:", tb)
-        return jsonify({"error": "SHAP runtime error", "traceback": tb}), 500
+        print("[api_shap] error:", traceback.format_exc())
+        return jsonify({"error": "SHAP runtime error"}), 500
 
 
 @bp_api.route("/history", methods=["GET"])
@@ -157,16 +176,33 @@ def api_history():
         return jsonify({"error": str(e)}), 500
 
 
+def _may_change_threshold() -> bool:
+    """
+    The decision threshold is global state, so changing it is not open to everyone.
+    With FRAUD_ADMIN_TOKEN set, the request must send it as ``X-Admin-Token``; without it,
+    only requests from the local machine are accepted.
+    """
+    token = os.environ.get("FRAUD_ADMIN_TOKEN")
+    if token:
+        return hmac.compare_digest(request.headers.get("X-Admin-Token", ""), token)
+    return request.remote_addr in ("127.0.0.1", "::1")
+
+
 @bp_api.route("/threshold", methods=["GET", "POST"])
 def api_threshold():
     """Get or set decision threshold τ."""
     if request.method == "GET":
         return jsonify({"threshold": float(get_threshold())})
 
+    if not _may_change_threshold():
+        return jsonify({"error": "Forbidden"}), 403
+
     try:
         payload = request.get_json(force=True)
-        t_raw = payload.get("threshold")
-        new_thr = set_threshold(float(t_raw))
+        t_raw = float(payload.get("threshold"))
+        if not 0.0 <= t_raw <= 1.0:
+            return jsonify({"error": "threshold must be between 0 and 1"}), 400
+        new_thr = set_threshold(t_raw)
         return jsonify({"threshold": float(new_thr)})
     except Exception as e:
         print("[api_threshold] error:", e)

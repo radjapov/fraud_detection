@@ -1,59 +1,50 @@
 #!/usr/bin/env python3
-# choose_threshold_and_save.py — finds optimal threshold for IEEE model and saves it.
+# choose_treshold_and_save.py — F1-optimal decision threshold, saved for the app.
+#
+# The served model was refit on the validation rows, so its own scores on them are in-sample.
+# The threshold is therefore chosen from the scores the stage-A model (trained without the
+# validation block) gave them; train_ieee_lgbm.py stores those in artifacts/val_scores_ieee.npz.
+# The validation block is separated from the training rows by the label-delay gap, so these
+# scores behave like scores of future transactions. The test period is never used here.
 
 import json
 from pathlib import Path
 
-import joblib
 import numpy as np
-import pandas as pd
 from sklearn.metrics import f1_score
 
 BASE = Path(__file__).resolve().parent
 ART = BASE / "artifacts"
-DATA = BASE / "data" / "ieee_prepared.csv"
-PIPE_PATH = ART / "pipeline_ieee.joblib"
+VAL_SCORES = ART / "val_scores_ieee.npz"
 THR_JSON = ART / "meta_ieee_threshold.json"
 
 
-def ensure_features(df, feat_list):
-    for f in feat_list:
-        if f not in df.columns:
-            df[f] = 0
-    return df[feat_list].fillna(0)
+def best_threshold(y, probs, steps=401):
+    """Threshold with the highest F1 on (y, probs); returns (threshold, f1)."""
+    best_thr, best_f1 = 0.0, -1.0
+    for t in np.linspace(0, 1, steps):
+        f1 = f1_score(y, (probs >= t).astype(int), zero_division=0)
+        if f1 > best_f1:
+            best_f1, best_thr = f1, float(t)
+    return best_thr, best_f1
 
 
 def main():
-    print("Running choose_threshold_and_save.py")
+    print("Running choose_treshold_and_save.py")
 
-    if not PIPE_PATH.exists():
-        raise FileNotFoundError(f"No pipeline found: {PIPE_PATH}")
+    if not VAL_SCORES.exists():
+        raise FileNotFoundError(f"No validation scores: {VAL_SCORES} (run train_ieee_lgbm.py)")
 
-    pipe = joblib.load(PIPE_PATH)
+    data = np.load(VAL_SCORES)
+    y, probs = data["y"].astype(int), data["p"].astype(float)
+    best_thr, best_f1 = best_threshold(y, probs)
 
-    df = pd.read_csv(DATA)
-    y = df["is_fraud"].astype(int).values
-    X = df.drop(columns=["is_fraud"])
-
-    feat_list = getattr(pipe, "feature_names_in_", list(X.columns))
-    Xs = ensure_features(X.copy(), feat_list)
-
-    probs = pipe.predict_proba(Xs)[:, 1]
-
-    best_thr = 0.0
-    best_f1 = -1
-
-    for t in np.linspace(0, 1, 200):
-        preds = (probs >= t).astype(int)
-        f1 = f1_score(y, preds)
-        if f1 > best_f1:
-            best_f1 = f1
-            best_thr = t
-
-    print(f"Best F1={best_f1:.4f} at threshold={best_thr:.4f}")
+    print(f"Best val F1={best_f1:.4f} at threshold={best_thr:.4f} (n_val={len(y)})")
 
     with open(THR_JSON, "w") as f:
-        json.dump({"threshold": float(best_thr)}, f)
+        json.dump(
+            {"threshold": best_thr, "chosen_metric": "f1", "split": "val", "val_f1": best_f1}, f
+        )
 
     print("Saved:", THR_JSON)
 

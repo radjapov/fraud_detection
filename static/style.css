@@ -84,6 +84,32 @@ body {
   gap: 12px 18px;
 }
 
+.feature-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.feature-group {
+  border: 1px solid rgba(132, 158, 255, 0.14);
+  border-radius: 12px;
+  padding: 8px 12px 12px;
+  background: rgba(10, 14, 40, 0.45);
+}
+
+.feature-group > summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 500;
+  color: #c9d3ff;
+  padding: 4px 0;
+  list-style-position: inside;
+}
+
+.feature-group[open] > summary {
+  margin-bottom: 10px;
+}
+
 .form-row {
   display: flex;
   flex-direction: column;

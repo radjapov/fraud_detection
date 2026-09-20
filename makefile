@@ -1,21 +1,24 @@
 # какой питон использовать
-PYTHON := python3.14
+PYTHON ?= python3
 IMAGE_NAME = fraud-detection-ui
 TAG = latest
 COMPOSE_FILE = docker-compose.yml
-.PHONY: run run-uv format lint docker-build docker-run
+.PHONY: run run-bp run-uv test format lint docker-build docker-run
 .PHONY: build-image up down logs shell clean
 
 # 1) Запуск приложения напрямую (без uv, просто то, что ты делаешь обычно)
 run:
-	$(PYTHON) app_ui.py
+	$(PYTHON) -m fraud_app
 
-run-bp:
-	python3.14 -m fraud_app
+run-bp: run
 
 # 2) Запуск через uv, если хочешь использовать зависимости из pyproject.toml
 run-uv:
-	uv run $(PYTHON) app_ui.py
+	uv run python -m fraud_app
+
+# tests (needs pytest: uv sync --extra dev)
+test:
+	$(PYTHON) -m pytest -q
 
 # 3) Автоформатирование кода (isort + black)
 format:
