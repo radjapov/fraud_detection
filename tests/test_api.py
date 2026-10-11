@@ -146,7 +146,7 @@ def test_api_threshold_admin_token(client, monkeypatch):
     assert ok.status_code == 200 and ok.get_json()['threshold'] == 0.4
 
 
-@patch('fraud_app.api.compute_shap_for_df_via_worker')
+@patch('fraud_app.api.compute_shap')
 def test_api_shap(mock_worker, client):
     mock_worker.return_value = {
         "base_value": 0.5,

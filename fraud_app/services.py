@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import json
 import math
+import os
+import select
 import subprocess
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -48,6 +51,13 @@ DATASET_FILE = DATA_DIR / "ieee_prepared.csv"
 # where SHAP worker script lives
 SHAP_WORKER_FILE = ROOT_DIR / "fraud_app" / "shap_worker.py"
 SHAP_INPUT_JSON = ARTIFACTS_DIR / "shap_input.json"
+
+# How /api/shap computes an explanation (FRAUD_SHAP_MODE):
+#   worker     a new Python process per request (process-isolated; pays start-up + loading)
+#   pool       one long-lived worker process, started once (process-isolated, loads once)
+#   inprocess  in the web process itself (fastest; no isolation from native crashes)
+SHAP_MODES = ("worker", "pool", "inprocess")
+SHAP_MODE = os.environ.get("FRAUD_SHAP_MODE", "worker")
 
 # ==== globals ====
 
@@ -283,26 +293,54 @@ def compute_probs(X_safe: pd.DataFrame) -> List[float]:
 _DEMO_FRAME: Optional[pd.DataFrame] = None
 
 
-def _demo_frame() -> pd.DataFrame:
-    """
-    Rows for the "Random normal / Random fraud" buttons: the chronological TEST split, i.e.
-    transactions the model never saw. Loaded once (the CSV is large).
-    """
-    global _DEMO_FRAME
-    if _DEMO_FRAME is None:
+_DATASET: Optional[pd.DataFrame] = None
+_BACKGROUND: Optional[pd.DataFrame] = None
+
+
+def _dataset() -> pd.DataFrame:
+    """The prepared dataset, read once (the CSV is large)."""
+    global _DATASET
+    if _DATASET is None:
         if not DATASET_FILE.exists():
             raise RuntimeError(f"Dataset not found: {DATASET_FILE}")
         df = pd.read_csv(DATASET_FILE)
         if "is_fraud" not in df.columns:
             raise RuntimeError("Dataset has no 'is_fraud' column")
-        _, _, test = split_data(df)
+        _DATASET = df
+    return _DATASET
+
+
+def _demo_frame() -> pd.DataFrame:
+    """
+    Rows for the "Random normal / Random fraud" buttons: the chronological TEST split, i.e.
+    transactions the model never saw.
+    """
+    global _DEMO_FRAME
+    if _DEMO_FRAME is None:
+        _, _, test = split_data(_dataset())
         _DEMO_FRAME = test.drop(columns=["TransactionDT"], errors="ignore").reset_index(drop=True)
     return _DEMO_FRAME
 
 
-def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
+def background_frame(pipe: Any, n: int = 1000) -> pd.DataFrame:
     """
-    Sample a random held-out transaction.
+    Reference transactions for the explainers: a fixed sample of the rows whose labels are known
+    before the test period (what the models were refit on), prepared for ``pipe``.
+    """
+    global _BACKGROUND
+    if _BACKGROUND is None:
+        from .features import labeled_rows
+
+        meta_delay = float((META or {}).get("label_delay_days", 0.0)) if isinstance(META, dict) else 0.0
+        lab = labeled_rows(_dataset(), meta_delay)
+        _BACKGROUND = lab.sample(n=min(n, len(lab)), random_state=0).reset_index(drop=True)
+    X, _ = prepare_features(_BACKGROUND, _get_feature_list_from_meta(), pipe)
+    return X
+
+
+def load_random_row_labeled(fraud: Optional[int]) -> Tuple[Dict[str, Any], Optional[int]]:
+    """
+    Sample a random held-out transaction; returns (row, true label).
     If fraud == 0/1 - filter by is_fraud, otherwise use all rows.
     Missing values are returned as None (JSON null).
     """
@@ -316,8 +354,14 @@ def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
         subset = df
 
     row = subset.sample(n=1, random_state=None).iloc[0].to_dict()
-    row.pop("is_fraud", None)
-    return {k: numpy_to_native(v) for k, v in row.items()}
+    label = row.pop("is_fraud", None)
+    out = {k: numpy_to_native(v) for k, v in row.items()}
+    return out, (None if label is None else int(label))
+
+
+def load_random_row(fraud: Optional[int]) -> Dict[str, Any]:
+    """A random held-out transaction without its label (see load_random_row_labeled)."""
+    return load_random_row_labeled(fraud)[0]
 
 
 # ==== form schema for the UI ====
@@ -384,6 +428,9 @@ def compute_shap_for_df(df_safe: pd.DataFrame) -> Dict[str, Any]:
     """
     if SHAP_EXPLAINER is None or PIPE is None:
         raise RuntimeError("SHAP explainer or pipeline not loaded")
+    model = getattr(SHAP_EXPLAINER, "model", None)
+    if model is not None and not hasattr(model, "threshold_types"):  # LightGBM >= 4 (as in the worker)
+        model.threshold_types = None
     return explain_row(PIPE, SHAP_EXPLAINER, df_safe)
 
 
@@ -437,6 +484,84 @@ def compute_shap_for_df_via_worker(df_safe: pd.DataFrame, timeout: int = 15) -> 
         raise RuntimeError("SHAP worker timeout")
     except Exception as e:
         raise RuntimeError(f"SHAP worker error: {e}")
+
+
+# ==== SHAP via one long-lived worker process ====
+
+
+class PersistentShapWorker:
+    """
+    Keeps one ``python -m fraud_app.shap_worker --serve`` process and talks to it line by line.
+    A crash in the native code kills only the worker; the next request starts a new one.
+    """
+
+    def __init__(self, start_timeout: float = 120.0):
+        self.proc: Optional[subprocess.Popen] = None
+        self.lock = threading.Lock()
+        self.start_timeout = start_timeout
+
+    def _readline(self, timeout: float) -> str:
+        assert self.proc is not None and self.proc.stdout is not None
+        ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
+        if not ready:
+            raise TimeoutError("SHAP worker did not answer in time")
+        line = self.proc.stdout.readline()
+        if not line:
+            raise RuntimeError("SHAP worker exited")
+        return line
+
+    def _start(self) -> None:
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "fraud_app.shap_worker", "--serve"],
+            cwd=str(ROOT_DIR),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=None,  # worker logs go to the server log
+            text=True,
+            bufsize=1,
+        )
+        if not json.loads(self._readline(self.start_timeout)).get("ready"):
+            raise RuntimeError("SHAP worker did not start")
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def explain(self, row: Dict[str, Any], timeout: float = 15.0) -> Dict[str, Any]:
+        with self.lock:
+            if not self.alive():
+                self._start()
+            assert self.proc is not None and self.proc.stdin is not None
+            try:
+                self.proc.stdin.write(json.dumps({"row": row}, ensure_ascii=False) + "\n")
+                self.proc.stdin.flush()
+                data = json.loads(self._readline(timeout))
+            except Exception:
+                self.close()  # a hung or dead worker is replaced on the next request
+                raise
+        if "error" in data:
+            raise RuntimeError(f"SHAP worker error: {data['error']}")
+        return data
+
+    def close(self) -> None:
+        if self.proc is not None:
+            try:
+                self.proc.kill()
+            finally:
+                self.proc = None
+
+
+SHAP_POOL = PersistentShapWorker()
+
+
+def compute_shap(df_safe: pd.DataFrame, mode: Optional[str] = None) -> Dict[str, Any]:
+    """SHAP for the first row of ``df_safe`` in the configured mode (see SHAP_MODE)."""
+    mode = mode or SHAP_MODE
+    if mode == "inprocess":
+        return compute_shap_for_df(df_safe.iloc[[0]])
+    if mode == "pool":
+        row = {k: numpy_to_native(v) for k, v in df_safe.iloc[0].to_dict().items()}
+        return SHAP_POOL.explain(row)
+    return compute_shap_for_df_via_worker(df_safe)
 
 
 # ==== helper to build history entry ====
