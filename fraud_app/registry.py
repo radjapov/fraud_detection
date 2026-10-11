@@ -130,6 +130,11 @@ def registry() -> Dict[str, ModelEntry]:
                                                  pipe=services.PIPE)
                 reg.update(discover())
                 _REGISTRY = reg
+    prod = _REGISTRY.get(PRODUCTION)
+    if prod is not None:  # the registry is cached, the threshold is not: POST /api/threshold changes it
+        from . import services
+
+        prod.threshold = float(services.get_threshold())
     return _REGISTRY
 
 

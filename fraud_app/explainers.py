@@ -60,6 +60,7 @@ class _Built:
         import shap  # noqa: F401  (import errors surface here, not at module import)
 
         self.method = method
+        self.lock = threading.Lock()  # LIME is reseeded per call on a shared explainer
         pipe = entry.pipe
         self.pre, self.clf, self.inner = _split(pipe)
         self.sources = sources
@@ -103,10 +104,11 @@ class _Built:
             return sv[0], float(base[-1]) if base.size else None
         from sklearn.utils import check_random_state
 
-        self.ex.random_state = check_random_state(0)  # same request -> same explanation
         f = lambda Z: self.clf.predict_proba(np.asarray(Z))
-        e = self.ex.explain_instance(np.nan_to_num(t[0]), f, num_features=t.shape[1],
-                                     num_samples=LIME_SAMPLES, labels=(1,))
+        with self.lock:  # reseeding and sampling must not interleave between concurrent requests
+            self.ex.random_state = check_random_state(0)  # same request -> same explanation
+            e = self.ex.explain_instance(np.nan_to_num(t[0]), f, num_features=t.shape[1],
+                                         num_samples=LIME_SAMPLES, labels=(1,))
         w = np.zeros(t.shape[1])
         for j, v in e.as_map()[1]:
             w[j] = v

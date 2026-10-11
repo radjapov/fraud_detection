@@ -80,7 +80,10 @@ def api_compare():
             raise ValueError(f"'explain' must be one of {METHODS + ('none',)}")
         top = _top(payload, 5)
         reg = registry.registry()
-        names: List[str] = payload.get("models") or list(reg)
+        names = payload.get("models") or list(reg)
+        if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+            raise ValueError("'models' must be a list of model names")
+        names = list(dict.fromkeys(names))  # every model is scored once, however often it is listed
         unknown = [n for n in names if n not in reg]
         if unknown:
             raise ValueError(f"unknown model(s): {', '.join(unknown)}")
@@ -114,7 +117,10 @@ def api_explain():
         method = payload.get("method", "shap")
         if method not in METHODS:
             raise ValueError(f"'method' must be one of {METHODS}")
-        entry = registry.get(payload.get("model", registry.PRODUCTION))
+        model = payload.get("model", registry.PRODUCTION)
+        if not isinstance(model, str):
+            raise ValueError("'model' must be a model name")
+        entry = registry.get(model)
         top = _top(payload, 10)
     except BadRequest:
         return jsonify({"error": "Request body must be valid JSON"}), 400
