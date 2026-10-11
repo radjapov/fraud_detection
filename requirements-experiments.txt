@@ -1,0 +1,11 @@
+# Everything needed on top of requirements.txt to run experiments/ and to load the pipelines they
+# save under runs/ into the /compare page. Kept apart so the service image stays small.
+# The saved pipelines are pickles: keep these versions in step with the environment that trained
+# them (they match uv.lock; `uv sync --extra experiments` installs the same set).
+-r requirements.txt
+xgboost==3.4.1
+catboost==1.2.10
+lime==0.2.0.1
+optuna==5.0.0
+matplotlib==3.11.2
+tabulate==0.10.0
