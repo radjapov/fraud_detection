@@ -23,3 +23,8 @@ data/ieee/sample_submission.csv
 # Local stuff
 artifacts/history.json
 artifacts/shap_input.json
+
+# experiment outputs (pipelines, Optuna studies, per-seed scores, figures): ~400 MB.
+# Reproduce with experiments/run_all.sh, then experiments/make_figures.py for the tables / figures.
+runs/*
+# !runs/paper/   <- uncomment to track the small (~1 MB) paper tables and figures

@@ -24,6 +24,7 @@ that explains each prediction with **SHAP**.
 - 🧩 **SHAP explainability**: per-transaction attribution, folded back to the input features
 - 🖥️ **UI**: the input form is generated from the model's own feature schema (`GET /api/schema`)
 - 📊 **Metrics panel**: ROC‑AUC, PR‑AUC, confusion matrix, F1 @ threshold on the test period, plus the validation F1
+- 🔬 **Model comparison** (`/compare`): one transaction scored by every trained model, explained with SHAP or LIME, plus the scripts that produced those models (`experiments/`)
 - 📂 **Artifacts-driven**: pipeline + meta + SHAP explainer + threshold + metrics JSON
 
 ---
@@ -233,7 +234,10 @@ PR-AUC, but a raw card identifier lets a model memorise individual cards, so it 
 │   ├─ features.py        # input typing, preprocessing, split    │
 │   ├─ schema.py          # feature groups, labels, types         │
 │   ├─ explain.py         # SHAP on the preprocessed matrix       │
-│   └─ shap_worker.py     # SHAP in a separate process            │
+│   ├─ shap_worker.py     # SHAP outside the web process          │
+│   ├─ registry.py        # models by name: production + runs/    │
+│   ├─ explainers.py      # SHAP / LIME behind one interface      │
+│   └─ compare.py         # /api/models, /compare, /explain       │
 └─────────────────────────────────────────────────────────────────┘
                              │
                              ▼
@@ -333,12 +337,17 @@ writes `artifacts/baseline_comparison.json`.
 | Endpoint | |
 |---|---|
 | `GET /api/schema` | grouped feature description the UI builds its form from |
-| `GET /api/random?fraud=0\|1` | a random transaction from the **held-out test period** |
+| `GET /api/random?fraud=0\|1` | a random transaction from the **held-out test period**; the response carries its true `label` next to the `row` |
 | `POST /api/predict` | probability + label; send any subset of features, the rest are "missing" |
-| `POST /api/shap` | SHAP per input feature (separate process, 15 s timeout, ~1–2 s in practice) |
+| `POST /api/shap` | SHAP per input feature for the production model (15 s timeout; where it runs is set by `FRAUD_SHAP_MODE`, ~1 s per request by default) |
 | `GET /api/history` | last 200 predictions |
 | `GET` / `POST /api/threshold` | read / change τ (POST: see below) |
 | `GET /api/metrics` | contents of `metrics_ieee.json` |
+| `GET /compare` | page: one transaction, every trained model, SHAP or LIME (see 8) |
+| `GET /api/models` | the models of the registry with their threshold and test metrics |
+| `POST /api/compare` | `{"row", "models"?, "explain": "shap"\|"lime"\|"none", "top"?}` → per model: probability, decision at its own threshold, top features, timings |
+| `POST /api/explain` | `{"row", "model"?, "method": "shap"\|"lime", "top"?}` → the contributions of one model |
+| `GET /api/experiments` | the tables from `runs/paper/*.csv`, if present |
 
 ```bash
 python3 -m fraud_app          # http://127.0.0.1:5001
@@ -348,6 +357,8 @@ python3 -m fraud_app          # http://127.0.0.1:5001
 |---|---|---|
 | `FRAUD_HOST` | `127.0.0.1` | bind address (the Docker image sets `0.0.0.0`) |
 | `FRAUD_PORT` | `5001` | port |
+| `FRAUD_SHAP_MODE` | `worker` | how `/api/shap` computes SHAP: `worker`, `pool` or `inprocess` (see 8) |
+| `FRAUD_MODEL_DIRS` | `runs/models` and `runs/lrq` | where the registry looks for experiment pipelines (`os.pathsep`-separated) |
 | `FRAUD_ADMIN_TOKEN` | unset | if set, `POST /api/threshold` needs header `X-Admin-Token`; if unset, only requests from localhost may change τ |
 
 ### 7. UI — `templates/index.html`, `static/`
@@ -359,6 +370,57 @@ python3 -m fraud_app          # http://127.0.0.1:5001
   **Explain (SHAP)** call the API, **Clear** resets.
 - Prediction block (label, probability, τ), top-8 SHAP bar chart with a compact list, history
   toggle, and the metrics panel (test-split figures, the label gap and the validation F1).
+
+### 8. Model & explanation comparison — `/compare`
+
+One transaction, every trained model, side by side: probability, the decision at the model's own
+threshold (marked right or wrong when the transaction comes from the test period), the top features
+of an explanation, and prediction / explanation time. A second block puts SHAP and LIME next to each
+other for one model and highlights the features both put in their top 10.
+
+- **Models** come from `fraud_app/registry.py`: the production pipeline plus every pipeline the
+  experiments saved under `runs/models/pipelines/` and `runs/lrq/pipelines/` (override with
+  `FRAUD_MODEL_DIRS`). Each carries the threshold chosen on its own validation block and its test
+  metrics from that run. Without `runs/` the page lists only the production model. Pipelines are
+  loaded on first use (a Random Forest pipeline is several hundred MB).
+- **Explanations** (`fraud_app/explainers.py`): SHAP (`TreeExplainer` with probability output,
+  `LinearExplainer` in log-odds for logistic regression) or LIME, computed on the model's own columns
+  and summed back to the 130 input features. LIME is reseeded per request, so the same request gives
+  the same answer. They run inside the web process; the first request per model builds the
+  explainer, which takes a few seconds.
+- **`/api/shap`** (production model, the main page) can run in three ways, set by `FRAUD_SHAP_MODE`:
+
+  | Mode | What runs where | Median over HTTP* |
+  |---|---|---|
+  | `worker` (default) | a new Python process per request: isolated from native crashes, pays start-up and model loading each time | 1146 ms |
+  | `pool` | one long-lived `python -m fraud_app.shap_worker --serve` process: same isolation, model loaded once, restarted if it dies or hangs | 44 ms (1.0 s cold start) |
+  | `inprocess` | inside the web process: fastest, no isolation | 34 ms |
+
+  \*`experiments/bench_latency.py`, macOS arm64 with 12 cores; `/api/predict` itself takes 25 ms.
+
+### 9. Experiments — `experiments/`
+
+Scripts that compare models, evaluation protocols and explanation methods under the service's own
+split, label delay and features (each docstring has the details):
+
+| Script | What it does |
+|---|---|
+| `run_models.py` | LogisticRegression, Random Forest, XGBoost, CatBoost and LightGBM with the same Optuna budget on the validation block, then the best parameters × 5 seeds on the test period; bootstrap CIs and paired deltas against LightGBM. `--models LogisticRegressionQ` adds a quantile-transform variant |
+| `run_protocols.py` | the same LightGBM scored under four protocols: resubstitution, random 80/20, chronological 80/20, chronological + 30-day label delay |
+| `run_explain.py` | SHAP vs LIME vs permutation importance per model: deletion fidelity, stability, agreement, cost |
+| `bench_latency.py` | response time over HTTP for `/api/predict` and the three `/api/shap` modes (backs up and restores `history.json`) |
+| `make_figures.py` | figures (PNG) and tables (CSV, Markdown) from `runs/` into `runs/paper/` |
+
+```bash
+uv sync --extra experiments          # or: pip install -r requirements-experiments.txt
+bash experiments/run_all.sh          # models → protocols → explanations; every stage is resumable
+python -m experiments.bench_latency
+python -m experiments.make_figures   # needs the three runs above
+```
+
+Everything lands in `runs/` (about 400 MB of pipelines, Optuna studies and per-seed scores), which is
+git-ignored. The saved pipelines are pickles: keep the library versions pinned in
+`requirements-experiments.txt` / `uv.lock`, or re-run the experiments.
 
 ---
 
@@ -398,12 +460,13 @@ dataset so the app and the tests can run.
 ## 🧪 Development
 
 ```bash
-pytest -q           # 34 tests: API, feature typing, missing values, SHAP, time split + label gaps, two-stage training, causality
+pytest -q           # 49 tests: API, feature typing, missing values, SHAP (3 modes), time split + label gaps, two-stage training, causality, model comparison
 make lint           # isort + black --check
 make format         # isort + black
 ```
 
-The tests never touch your real `artifacts/meta_ieee_threshold.json` or `history.json`.
+The tests never touch your real `artifacts/meta_ieee_threshold.json` or `history.json`. The comparison
+tests that need the experiment pipelines under `runs/` skip themselves when it is absent.
 
 ---
 

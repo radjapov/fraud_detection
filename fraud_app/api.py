@@ -27,7 +27,7 @@ from werkzeug.exceptions import BadRequest
 from .services import (
     compute_probs_from_pipeline,
     build_schema,
-    compute_shap_for_df_via_worker,
+    compute_shap,
     ensure_features_df,
     get_threshold,
     json_safe,
@@ -35,6 +35,7 @@ from .services import (
     load_history,
     load_metrics,
     load_random_row,
+    load_random_row_labeled,
     save_history_entry,
     set_threshold,
 )
@@ -84,8 +85,10 @@ def api_random():
         fraud_val = 1 if fraud_param in ("1", "true", "True") else 0
 
     try:
-        row = load_random_row(fraud_val)
-        return jsonify({"row": json_safe(row)})
+        row, label = load_random_row_labeled(fraud_val)
+        # the true label travels next to the row (never inside it), so the comparison page can
+        # show whether a model was right; the prediction endpoints never see it
+        return jsonify({"row": json_safe(row), "label": label})
     except Exception as e:
         print("[api_random] error:", e)
         return jsonify({"error": str(e)}), 500
@@ -141,7 +144,7 @@ def api_predict():
 def api_shap():
     """
     SHAP explanation for a single example (or first row if list).
-    Computed via worker process to avoid crashes inside main app.
+    Where it is computed is set by FRAUD_SHAP_MODE (worker / pool / inprocess, see services).
     """
     try:
         payload = request.get_json(force=True)
@@ -156,7 +159,7 @@ def api_shap():
         raw_df = pd.DataFrame(rows)
         safe_df, feat_list = ensure_features_df(raw_df.copy())
 
-        shap_data = compute_shap_for_df_via_worker(safe_df)
+        shap_data = compute_shap(safe_df)
         return jsonify(json_safe(shap_data))
     except BadRequest:
         return jsonify({"error": "Request body must be valid JSON"}), 400

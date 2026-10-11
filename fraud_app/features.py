@@ -107,14 +107,17 @@ def prepare_features(
     cats = set(categorical_features(pipe))
     keep_nan = handles_missing(pipe)
 
-    X = pd.DataFrame(index=df.index)
+    # columns are built first and joined once: inserting 130 columns one by one fragments the
+    # frame (pandas PerformanceWarning on every request) and costs time per prediction
+    cols = {}
     for f in feat_list:
         col = df[f] if f in df.columns else pd.Series(np.nan, index=df.index, dtype=object)
         if f in cats:
-            X[f] = category_labels(col)
+            cols[f] = category_labels(col)
         else:
             num = pd.to_numeric(col, errors="coerce").astype(np.float64)
-            X[f] = num if keep_nan else num.fillna(0.0)
+            cols[f] = num if keep_nan else num.fillna(0.0)
+    X = pd.DataFrame(cols, index=df.index, columns=feat_list)
     return X, feat_list
 
 

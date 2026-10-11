@@ -110,6 +110,40 @@ def test_shap_worker_matches_inline(loaded):
 
 
 @needs_model
+def test_shap_modes_agree(loaded):
+    """worker, long-lived worker (pool) and in-process SHAP give the same numbers."""
+    if services.SHAP_EXPLAINER is None:
+        pytest.skip("no SHAP explainer artifact")
+    rows = _sample_rows(400)
+    X, _ = services.ensure_features_df(rows.iloc[[0]])
+    ref = [i["shap"] for i in services.compute_shap(X, mode="inprocess")["shap"]]
+    try:
+        for mode in ("pool", "worker"):
+            got = [i["shap"] for i in services.compute_shap(X, mode=mode)["shap"]]
+            np.testing.assert_allclose(ref, got, atol=1e-8)
+        # the pool keeps its process between requests
+        pid = services.SHAP_POOL.proc.pid
+        services.compute_shap(X, mode="pool")
+        assert services.SHAP_POOL.proc.pid == pid
+    finally:
+        services.SHAP_POOL.close()
+
+
+@needs_model
+def test_pool_recovers_after_worker_dies(loaded):
+    if services.SHAP_EXPLAINER is None:
+        pytest.skip("no SHAP explainer artifact")
+    X, _ = services.ensure_features_df(_sample_rows(50).iloc[[0]])
+    try:
+        services.compute_shap(X, mode="pool")
+        services.SHAP_POOL.proc.kill()
+        services.SHAP_POOL.proc.wait()
+        assert "shap" in services.compute_shap(X, mode="pool")  # restarted transparently
+    finally:
+        services.SHAP_POOL.close()
+
+
+@needs_model
 def test_schema_matches_the_model(loaded):
     schema = services.build_schema()
     listed = [f["name"] for g in schema["groups"] for f in g["features"]]
