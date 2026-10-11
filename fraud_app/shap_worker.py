@@ -26,6 +26,14 @@ SHAP is computed on the preprocessed matrix and folded back to the input feature
 (see fraud_app.explain).
 
 Все логи идут в stderr, чтобы stdout был чистым JSON.
+
+Long-lived mode (FRAUD_SHAP_MODE=pool in fraud_app.services):
+
+    python -m fraud_app.shap_worker --serve
+
+loads the artifacts once, prints {"ready": true}, then answers one JSON line per request
+(same payload / answer as above) until stdin closes. The model still runs outside the web
+process, as before, but the start-up and artifact loading are paid once instead of per request.
 """
 
 from __future__ import annotations
@@ -51,7 +59,46 @@ def log(*args):
     print("[worker]", *args, file=sys.stderr, flush=True)
 
 
+def load():
+    pipe = joblib.load(PIPELINE_FILE)
+    explainer = joblib.load(SHAP_FILE)
+    # Monkey-patch fix for LightGBM >= 4.0 'threshold_types' error
+    if hasattr(explainer, "model") and not hasattr(explainer.model, "threshold_types"):
+        explainer.model.threshold_types = None
+    return pipe, explainer
+
+
+def answer(pipe, explainer, payload):
+    row = payload.get("row")
+    if row is None:
+        rows = payload.get("rows") or []
+        row = rows[0] if rows else None
+    if row is None:
+        raise ValueError("No 'row' in payload")
+    X, _ = prepare_features(pd.DataFrame([row]), list(row.keys()), pipe)
+    return explain_row(pipe, explainer, X)
+
+
+def serve():
+    """One JSON request per stdin line, one JSON answer per stdout line."""
+    pipe, explainer = load()
+    log("serving; loaded pipeline and SHAP explainer from", ARTIFACTS_DIR)
+    print(json.dumps({"ready": True}), flush=True)
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            out = answer(pipe, explainer, json.loads(line))
+        except Exception as e:  # report the error, keep serving
+            log("request failed:", e)
+            out = {"error": str(e)}
+        print(json.dumps(out), flush=True)
+
+
 def main():
+    if "--serve" in sys.argv[1:]:
+        serve()
+        return
     for path in (PIPELINE_FILE, SHAP_FILE):
         if not path.exists():
             log("artifact not found:", path)

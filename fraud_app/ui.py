@@ -9,3 +9,9 @@ bp_ui = Blueprint("ui", __name__)
 def index():
     # Flask возьмет шаблон из template_folder, который указан в create_app()
     return render_template("index.html")
+
+
+@bp_ui.route("/compare")
+def compare():
+    """Side-by-side comparison of models and explanation methods on one transaction."""
+    return render_template("compare.html")

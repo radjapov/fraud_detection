@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FraudDetect · model comparison</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="page">
+  <header class="header">
+    <div>
+      <h1>Model &amp; explanation comparison</h1>
+      <p class="subtitle">One transaction · every trained model · SHAP or LIME</p>
+    </div>
+    <a class="nav-link" href="/">← Single-model demo</a>
+  </header>
+
+  <main class="layout layout-single">
+    <section class="card">
+      <h2>Transaction</h2>
+      <div class="cmp-controls">
+        <div class="buttons-row">
+          <button type="button" id="btn-rand-fraud">Random fraud</button>
+          <button type="button" id="btn-rand-normal">Random normal</button>
+        </div>
+        <label class="cmp-select">Explanation
+          <select id="sel-method">
+            <option value="shap" selected>SHAP</option>
+            <option value="lime">LIME</option>
+            <option value="none">None (scores only)</option>
+          </select>
+        </label>
+        <button type="button" id="btn-compare" class="primary" disabled>Compare models</button>
+      </div>
+      <div id="txn-summary" class="txn-summary muted">Pick a random transaction from the test period.</div>
+      <div id="cmp-status" class="muted cmp-status"></div>
+    </section>
+
+    <section class="card">
+      <h2>Models</h2>
+      <div class="table-wrap">
+        <table class="cmp-table" id="cmp-table">
+          <thead>
+            <tr>
+              <th>Model</th>
+              <th title="Test PR-AUC, chronological split with a 30-day label delay: mean of 5 seeds for the experiment models, one run for the production model">Test PR-AUC</th>
+              <th>Fraud probability</th>
+              <th>Decision</th>
+              <th>Top features (→ fraud / → legit)</th>
+              <th title="Model only, one transaction">Predict, ms</th>
+              <th>Explain, ms</th>
+            </tr>
+          </thead>
+          <tbody id="cmp-body">
+            <tr><td colspan="7" class="muted">No comparison yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="muted small">The marker on each bar is the model's own threshold, chosen on its validation block.
+        The first request builds the explainers and takes a few seconds.</p>
+    </section>
+
+    <section class="card">
+      <h2>SHAP vs LIME on the same decision</h2>
+      <div class="cmp-controls">
+        <label class="cmp-select">Model <select id="sel-model"></select></label>
+        <button type="button" id="btn-sidebyside" class="secondary" disabled>Explain with both</button>
+        <span id="overlap" class="overlap muted"></span>
+      </div>
+      <div class="sbs">
+        <div><h3>SHAP <span id="t-shap" class="muted small"></span></h3><ol id="list-shap" class="sbs-list"></ol></div>
+        <div><h3>LIME <span id="t-lime" class="muted small"></span></h3><ol id="list-lime" class="sbs-list"></ol></div>
+      </div>
+      <p class="muted small">Highlighted features appear in both top-10 lists. In the experiments the top-5 lists of
+        the two methods shared on average 0.25 of five features for tree models.</p>
+    </section>
+
+    <section class="card">
+      <h2>Experiment results</h2>
+      <div id="exp-box" class="muted">Loading…</div>
+    </section>
+  </main>
+</div>
+<script src="{{ url_for('static', filename='compare.js') }}"></script>
+</body>
+</html>
