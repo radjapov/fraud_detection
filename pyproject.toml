@@ -20,6 +20,15 @@ dev = [
     "isort",
     "pytest",
 ]
+# model / explanation comparison: the experiments/ scripts and the /compare page
+experiments = [
+    "xgboost",
+    "catboost",
+    "lime",
+    "optuna",
+    "matplotlib",
+    "tabulate",
+]
 
 [tool.uv]
 python = "3.12"
