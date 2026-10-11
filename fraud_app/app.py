@@ -3,6 +3,7 @@ from pathlib import Path
 from flask import Flask
 
 from .api import bp_api
+from .compare import bp_compare
 from .ui import bp_ui
 
 
@@ -25,5 +26,6 @@ def create_app() -> Flask:
     # регаем блюпринты
     app.register_blueprint(bp_ui)  # фронт на "/"
     app.register_blueprint(bp_api, url_prefix="/api")  # api на "/api/..."
+    app.register_blueprint(bp_compare, url_prefix="/api")  # model / explanation comparison
 
     return app
