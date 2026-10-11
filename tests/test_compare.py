@@ -117,3 +117,67 @@ def test_experiments_tables_keep_column_order(client):
         pytest.skip("no runs/paper tables")
     t = d["tables"]["table1_models"]
     assert t["columns"][0] == "model" and all(len(r) == len(t["columns"]) for r in t["rows"])
+
+
+@needs_data
+def test_production_threshold_follows_the_service(client, tmp_path, monkeypatch):
+    # the registry is cached, but POST /api/threshold changes the threshold at runtime
+    monkeypatch.setattr(services, "THRESH_JSON", tmp_path / "threshold.json")
+    monkeypatch.setattr(services, "THRESHOLD", services.THRESHOLD)  # restored on teardown
+    client.get("/api/models")  # builds the registry with the current threshold
+    assert client.post("/api/threshold", json={"threshold": 0.77}).status_code == 200
+    models = {m["name"]: m for m in client.get("/api/models").get_json()["models"]}
+    assert models[registry.PRODUCTION]["threshold"] == pytest.approx(0.77)
+
+
+@needs_data
+def test_compare_decides_with_the_current_production_threshold(client, row, tmp_path, monkeypatch):
+    monkeypatch.setattr(services, "THRESH_JSON", tmp_path / "threshold.json")
+    monkeypatch.setattr(services, "THRESHOLD", services.THRESHOLD)
+    client.get("/api/models")
+    assert client.post("/api/threshold", json={"threshold": 0.01}).status_code == 200
+    d = client.post("/api/compare", json={"row": row, "models": [registry.PRODUCTION], "explain": "none"}).get_json()
+    (r,) = d["results"]
+    assert r["threshold"] == pytest.approx(0.01) and r["fraud"] == (r["probability"] >= 0.01)
+
+
+@needs_data
+def test_compare_and_explain_validate_model_names(client, row):
+    for bad in (5, "production", [["x"]], [1], {"a": 1}):
+        r = client.post("/api/compare", json={"row": row, "models": bad, "explain": "none"})
+        assert r.status_code == 400, bad
+    assert client.post("/api/explain", json={"row": row, "model": ["production"]}).status_code == 400
+    assert client.post("/api/explain", json={"row": row, "model": 7}).status_code == 400
+
+
+@needs_data
+def test_compare_scores_each_model_once(client, row):
+    body = {"row": row, "models": [registry.PRODUCTION] * 20, "explain": "none"}
+    d = client.post("/api/compare", json=body).get_json()
+    assert [r["model"] for r in d["results"]] == [registry.PRODUCTION]
+
+
+@needs_data
+@needs_experiments
+def test_lime_gives_the_same_answer_under_concurrent_requests(row):
+    # the LIME explainer is shared and reseeded per call: concurrent requests must not mix seeds
+    from concurrent.futures import ThreadPoolExecutor
+
+    import pandas as pd
+
+    from fraud_app.explainers import explain
+    from fraud_app.features import prepare_features
+
+    e = registry.get("LightGBM")
+    X, _ = prepare_features(pd.DataFrame([row]), services._get_feature_list_from_meta(), e.pipe)
+
+    def background():
+        return services.background_frame(e.pipe)
+
+    def run(_):
+        return [(c["feature"], round(c["contribution"], 9)) for c in explain(e, X, "lime", background)["contributions"]]
+
+    run(0)  # build the explainer once
+    with ThreadPoolExecutor(4) as pool:
+        runs = list(pool.map(run, range(12)))
+    assert all(r == runs[0] for r in runs[1:])
