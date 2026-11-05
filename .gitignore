@@ -28,3 +28,7 @@ artifacts/shap_input.json
 # Reproduce with experiments/run_all.sh, then experiments/make_figures.py for the tables / figures.
 runs/*
 # !runs/paper/   <- uncomment to track the small (~1 MB) paper tables and figures
+
+# third-party code used by experiments/run_external.py (no licence: never commit)
+external/
+external_repo/
