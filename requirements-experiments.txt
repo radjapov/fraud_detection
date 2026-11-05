@@ -9,3 +9,4 @@ lime==0.2.0.1
 optuna==5.0.0
 matplotlib==3.11.2
 tabulate==0.10.0
+imbalanced-learn
